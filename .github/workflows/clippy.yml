@@ -1,0 +1,31 @@
+name: clippy
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          # Install both build tools (for static build) and dev libs (for dynamic link)
+          # This ensures clippy works regardless of whether --all-features enables static feature
+          sudo apt-get install -y yasm nasm pkg-config libclang-dev clang libavcodec-dev libavformat-dev libavfilter-dev libavdevice-dev libavutil-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Clippy Check
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings

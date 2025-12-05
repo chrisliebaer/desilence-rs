@@ -1,0 +1,19 @@
+name: rustfmt
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Format Check
+        run: cargo +nightly fmt --all -- --check
