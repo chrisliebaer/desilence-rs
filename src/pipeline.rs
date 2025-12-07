@@ -282,7 +282,7 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 		"Starting frame processing"
 	);
 
-	let (_video_ist_index, mut video_dec) = video_decoder.unwrap();
+	let (video_ist_index, mut video_dec) = video_decoder.unwrap();
 
 	for (stream, packet) in ictx.packets() {
 		let ist_index = stream.index();
@@ -314,85 +314,18 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 						continue; // Skip silent frames
 					}
 
-					// Adjust PTS for continuous output
 					let output_pts = current_output_pts.entry(mapping.output_index).or_insert(0);
+					let fps = video_dec.frame_rate();
 
-					decoded.set_pts(Some(*output_pts));
-
-					// For rawvideo, we can write the frame data directly as a packet
-					let mut out_packet = Packet::empty();
-
-					// Calculate frame duration
-					let frame_duration = if let Some(fps) = video_dec.frame_rate() {
-						if fps.numerator() > 0 {
-							let tb = mapping.output_time_base;
-							// Duration = (TB.den * FPS.den) / (TB.num * FPS.num)
-							let num = tb.denominator() as i64 * fps.denominator() as i64;
-							let den = tb.numerator() as i64 * fps.numerator() as i64;
-							(num + den / 2) / den
-						} else {
-							packet.duration()
-						}
-					} else {
-						packet.duration()
-					};
-
-					// Use safe getters for frame properties
-					let format = decoded.format();
-					let width = decoded.width();
-					let height = decoded.height();
-					let align = 1;
-
-					// Calculate required buffer size for the full image (all planes)
-					// SAFETY: av_image_get_buffer_size computes size from valid format/dims.
-					// We rely on Into<AVPixelFormat> for safe conversion.
-					let size = unsafe { ffmpeg::ffi::av_image_get_buffer_size(format.into(), width as i32, height as i32, align) };
-
-					if size > 0 {
-						let pkt_ptr = out_packet.as_mut_ptr();
-
-						// Allocate packet with correct size
-						// CRITICAL: av_new_packet resets PTS/DTS, so we must set them AFTER this call
-						// SAFETY: pkt_ptr is obtained from initialized Packet via FFI wrapper.
-						let alloc_ret = unsafe { ffmpeg::ffi::av_new_packet(pkt_ptr, size) };
-
-						if alloc_ret >= 0 {
-							unsafe {
-								// SAFETY:
-								// 1. pkt_ptr->data is valid buffer of 'size' bytes allocated above.
-								// 2. decoded is valid Frame, so as_ptr() is valid.
-								// 3. (*frame_ptr).data and linesize are valid for the given format.
-								// 4. av_image_copy_to_buffer flattens planar data safely if size is correct.
-								let frame_ptr = decoded.as_ptr();
-								ffmpeg::ffi::av_image_copy_to_buffer(
-									(*pkt_ptr).data,
-									size,
-									(*frame_ptr).data.as_ptr() as *const *const u8,
-									(*frame_ptr).linesize.as_ptr(),
-									format.into(),
-									width as i32,
-									height as i32,
-									align,
-								);
-							}
-						}
-					} else {
-						warn!(
-							"Failed to calculate buffer size for video frame: width={} height={} format={:?}",
-							width, height, format
-						);
-					}
-
-					// Set packet properties AFTER allocation
-					out_packet.set_pts(Some(*output_pts));
-					out_packet.set_dts(Some(*output_pts));
-					out_packet.set_duration(frame_duration);
-					out_packet.set_stream(mapping.output_index);
-
-					out_packet.write_interleaved(&mut octx)?;
-
-					*output_pts += frame_duration;
-					stats.output_frames += 1;
+					write_raw_video_frame(
+						&mut octx, 
+						&decoded, 
+						mapping, 
+						output_pts, 
+						fps, 
+						packet.duration(),
+						&mut stats,
+					)?;
 				}
 			},
 			media::Type::Audio => {
@@ -462,11 +395,24 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 	}
 
 	// Flush decoders
-	video_dec.send_eof()?;
-	let mut decoded = frame::Video::empty();
-	while video_dec.receive_frame(&mut decoded).is_ok() {
-		// Process remaining frames
-		stats.output_frames += 1;
+	// Re-find mapping for video stream using the captured index
+	if let Some(mapping) = stream_mappings.iter().find(|m| m.input_index == video_ist_index) {
+		video_dec.send_eof()?;
+		let mut decoded = frame::Video::empty();
+		while video_dec.receive_frame(&mut decoded).is_ok() {
+			let output_pts = current_output_pts.entry(mapping.output_index).or_insert(0);
+			let fps = video_dec.frame_rate();
+			
+			write_raw_video_frame(
+				&mut octx,
+				&decoded,
+				mapping,
+				output_pts,
+				fps,
+				0, // No packet duration available during flush
+				&mut stats,
+			)?;
+		}
 	}
 
 	for (_, decoder) in audio_decoders.iter_mut() {
@@ -516,6 +462,92 @@ impl PipelineStats {
 			(self.output_packets as f64 / total as f64) * 100.0
 		}
 	}
+}
+
+/// Helper to write a raw video frame to the output context.
+/// Encapsulates unsafe FFmpeg packet allocation and buffer copying.
+fn write_raw_video_frame(
+	octx: &mut format::context::Output,
+	decoded: &frame::Video,
+	mapping: &StreamMapping,
+	current_pts: &mut i64,
+	frame_rate: Option<Rational>,
+	packet_duration: i64,
+	stats: &mut PipelineStats,
+) -> Result<()> {
+	// Adjust PTS for continuous output
+	let mut out_video_frame = decoded.clone();
+	out_video_frame.set_pts(Some(*current_pts));
+
+	let mut out_packet = Packet::empty();
+
+	// Calculate frame duration
+	let frame_duration = if let Some(fps) = frame_rate {
+		if fps.numerator() > 0 {
+			let tb = mapping.output_time_base;
+			// Duration = (TB.den * FPS.den) / (TB.num * FPS.num)
+			let num = tb.denominator() as i64 * fps.denominator() as i64;
+			let den = tb.numerator() as i64 * fps.numerator() as i64;
+			(num + den / 2) / den
+		} else {
+			packet_duration
+		}
+	} else {
+		packet_duration
+	};
+
+	// Use safe getters for frame properties
+	let format = out_video_frame.format();
+	let width = out_video_frame.width();
+	let height = out_video_frame.height();
+	let align = 1;
+
+	// Calculate required buffer size for the full image (all planes)
+	// SAFETY: av_image_get_buffer_size computes safe size from valid format/dims.
+	let size = unsafe { ffmpeg::ffi::av_image_get_buffer_size(format.into(), width as i32, height as i32, align) };
+
+	if size > 0 {
+		let pkt_ptr = out_packet.as_mut_ptr();
+
+		// Allocate packet with correct size
+		// SAFETY: pkt_ptr is valid. av_new_packet handles allocation.
+		let alloc_ret = unsafe { ffmpeg::ffi::av_new_packet(pkt_ptr, size) };
+
+		if alloc_ret >= 0 {
+			unsafe {
+				// SAFETY: Valid buffer and frame pointers ensured by size check and alloc check.
+				let frame_ptr = out_video_frame.as_ptr();
+				ffmpeg::ffi::av_image_copy_to_buffer(
+					(*pkt_ptr).data,
+					size,
+					(*frame_ptr).data.as_ptr() as *const *const u8,
+					(*frame_ptr).linesize.as_ptr(),
+					format.into(),
+					width as i32,
+					height as i32,
+					align,
+				);
+			}
+		}
+	} else {
+		warn!(
+			"Failed to calculate buffer size for video frame: width={} height={} format={:?}",
+			width, height, format
+		);
+	}
+
+	// Set packet properties included updated PTS/DTS
+	out_packet.set_pts(Some(*current_pts));
+	out_packet.set_dts(Some(*current_pts));
+	out_packet.set_duration(frame_duration);
+	out_packet.set_stream(mapping.output_index);
+
+	out_packet.write_interleaved(octx)?;
+
+	*current_pts += frame_duration;
+	stats.output_frames += 1;
+	
+	Ok(())
 }
 
 #[cfg(test)]
