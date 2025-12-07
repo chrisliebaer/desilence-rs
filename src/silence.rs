@@ -4,7 +4,6 @@ use std::path::Path;
 
 use ffmpeg_next::{
 	self as ffmpeg,
-	filter,
 	format,
 	frame,
 	media,
@@ -214,47 +213,6 @@ pub fn detect_silence<P: AsRef<Path>>(
 	let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
 	let mut decoder = context.decoder().audio()?;
 
-	// Create filter graph for silence detection
-	let mut filter_graph = filter::Graph::new();
-
-	// Input buffer filter
-	let abuffer_args = format!(
-		"time_base={}:sample_rate={}:sample_fmt={}:channel_layout=0x{:x}",
-		stream.time_base(),
-		decoder.rate(),
-		decoder.format().name(),
-		decoder.channel_layout().bits()
-	);
-
-	debug!(args = %abuffer_args, "Creating abuffer filter");
-
-	filter_graph.add(
-		&filter::find("abuffer").ok_or_else(|| DesilenceError::FilterGraph {
-			message: "abuffer filter not found".to_string(),
-		})?,
-		"in",
-		&abuffer_args,
-	)?;
-
-	// Output buffer sink
-	filter_graph.add(
-		&filter::find("abuffersink").ok_or_else(|| DesilenceError::FilterGraph {
-			message: "abuffersink filter not found".to_string(),
-		})?,
-		"out",
-		"",
-	)?;
-
-	// Connect filters with silencedetect in the middle
-	// The filter spec is: silencedetect=n=<threshold>:d=<duration>
-	let silencedetect_spec = format!("silencedetect=n={}:d={}", noise_threshold, duration);
-	debug!(spec = %silencedetect_spec, "Creating filter chain");
-
-	filter_graph.output("in", 0)?.input("out", 0)?.parse(&silencedetect_spec)?;
-
-	filter_graph.validate()?;
-
-	debug!(graph = %filter_graph.dump(), "Filter graph created");
 
 	// Parse threshold once at the start for proper error handling
 	let threshold_linear = parse_threshold(noise_threshold)?;
@@ -265,14 +223,11 @@ pub fn detect_silence<P: AsRef<Path>>(
 	let mut total_silence_duration = 0.0;
 	let mut frame_count = 0u64;
 
-	// We need to capture filter metadata - unfortunately rust-ffmpeg doesn't expose
-	// the silencedetect metadata directly. We'll need to parse it from the side data
-	// or use an alternative approach.
+	// The silencedetect filter in ffmpeg is convoluted to use as a library.
 	//
-	// The silencedetect filter outputs to stderr in ffmpeg CLI, but as a library
-	// we need to capture the AVFrame metadata or use a custom approach.
-	//
-	// Alternative: We'll implement our own silence detection by analyzing audio levels.
+	// But we can simply implement our own silence detection by analyzing audio levels.
+	// This gives the added benefit of being able to use more advanced audio processing
+	// techniques if needed.
 
 	info!("Processing audio frames for silence detection...");
 
