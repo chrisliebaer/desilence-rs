@@ -28,6 +28,14 @@ use tracing_subscriber::{
 };
 
 fn main() -> Result<()> {
+	// Handle --dump-help flag before parsing since regular invocation would require all flags to be valid
+	if std::env::args().any(|arg| arg == "--dump-help") {
+		use clap::CommandFactory;
+		let mut cmd = Args::command();
+		print!("{}", cmd.render_help());
+		std::process::exit(0);
+	}
+
 	// Parse CLI arguments
 	let args = Args::parse();
 

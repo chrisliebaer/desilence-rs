@@ -30,17 +30,17 @@ from pathlib import Path
 
 
 def get_help_text(binary_path: Path) -> str:
-	"""Extract help text from desilence-rs using --help flag."""
+	"""Extract help text from desilence-rs using --dump-help flag."""
 	try:
 		result = subprocess.run(
-			[str(binary_path), "--help"],
+			[str(binary_path), "--dump-help"],
 			capture_output=True,
 			text=True,
 			check=True,
 		)
 		return result.stdout
 	except subprocess.CalledProcessError as e:
-		print(f"Error: Failed to run {binary_path} --help", file=sys.stderr)
+		print(f"Error: Failed to run {binary_path} --dump-help", file=sys.stderr)
 		print(f"stderr: {e.stderr}", file=sys.stderr)
 		sys.exit(1)
 	except FileNotFoundError:
