@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 COPY . .
 
+# Run tests
+RUN cargo test --release
+
 # Build release binary
 RUN cargo build --release
 

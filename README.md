@@ -58,7 +58,7 @@ Adjust the noise threshold (`-50dB` by default) and minimum silence period.
 
 ### Prerequisites
 - **Rust 1.70+**
-- **FFmpeg build dependencies** (Project builds FFmpeg from source statically)
+- **FFmpeg** (static or shared libraries, depending on build method)
 
 ### Building on Windows
 
@@ -114,18 +114,58 @@ docker build -t desilence-rs .
 
 ## Options
 
+<details>
+<summary>Click to expand command-line options</summary>
+
+<!-- BEGIN CLI OPTIONS -->
 ```text
+Remove silence from video files, streaming output to stdout
+
 Usage: desilence-rs [OPTIONS] --input <INPUT>
 
 Options:
-  -i, --input <INPUT>              Input video file path
-  -n, --noise-threshold <THRESHOLD> Silence detection threshold in dB [default: -50dB]
-  -d, --duration <SECONDS>         Minimum silence duration in seconds [default: 0.5]
-  -a, --audio-stream <INDEX>       Audio stream index for silence detection (0-based)
-      --merge-audio                Merge all audio streams for detection (expert)
-  -l, --list-streams              List available streams and exit
-  -v, --verbose                   Increase verbosity (-v, -vv, -vvv)
-  -q, --quiet                     Suppress non-error output
-  -h, --help                      Print help
-  -V, --version                   Print version
+  -i, --input <INPUT>
+          Input video file path
+
+  -n, --noise-threshold <NOISE_THRESHOLD>
+          Silence detection threshold in dB (negative value)
+          
+          Audio below this level is considered silence. Lower values (more negative) detect quieter sounds as non-silent.
+          
+          [default: -50dB]
+
+  -d, --duration <DURATION>
+          Minimum silence duration in seconds
+          
+          Silence segments shorter than this are ignored.
+          
+          [default: 0.5]
+
+  -a, --audio-stream <AUDIO_STREAM>
+          Audio stream index to use for silence detection (0-based)
+          
+          By default, uses the first audio stream. Use -l to list available streams.
+
+      --merge-audio
+          Merge all audio streams for silence detection
+          
+          Expert option: combines all audio streams before detection. Useful when silence might only be present in some channels.
+
+  -l, --list-streams
+          List available streams and exit
+
+  -v, --verbose...
+          Verbose output (repeat for more verbosity: -v, -vv, -vvv)
+
+  -q, --quiet
+          Quiet mode - suppress all non-error output
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
 ```
+<!-- END CLI OPTIONS -->
+
+</details>
