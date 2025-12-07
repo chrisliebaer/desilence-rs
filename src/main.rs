@@ -16,18 +16,18 @@ use desilence_rs::{
 		print_stream_info,
 	},
 };
+use ffmpeg_next as ffmpeg;
 use miette::Result;
 use tracing::{
 	info,
+	level_filters::LevelFilter,
 	warn,
 };
-use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{
 	fmt,
 	prelude::*,
 	EnvFilter,
 };
-use ffmpeg_next as ffmpeg;
 
 fn main() -> Result<()> {
 	// Handle --dump-help flag before parsing since regular invocation would require all flags to be valid
@@ -98,20 +98,26 @@ fn run(args: Args) -> std::result::Result<(), DesilenceError> {
 			// Merge specific streams (relative -> absolute)
 			let mut absolute_indices = Vec::new();
 			for &idx in indices {
-				let stream = stream_info.audio_streams.get(idx).ok_or(DesilenceError::InvalidAudioStreamIndex {
-					index: idx,
-					count: stream_info.audio_streams.len(),
-				})?;
+				let stream = stream_info
+					.audio_streams
+					.get(idx)
+					.ok_or(DesilenceError::InvalidAudioStreamIndex {
+						index: idx,
+						count: stream_info.audio_streams.len(),
+					})?;
 				absolute_indices.push(stream.index);
 			}
 			Some(absolute_indices)
 		}
 	} else if let Some(idx) = args.audio_stream {
 		// Single stream mode (relative -> absolute)
-		let stream = stream_info.audio_streams.get(idx).ok_or(DesilenceError::InvalidAudioStreamIndex {
-			index: idx,
-			count: stream_info.audio_streams.len(),
-		})?;
+		let stream = stream_info
+			.audio_streams
+			.get(idx)
+			.ok_or(DesilenceError::InvalidAudioStreamIndex {
+				index: idx,
+				count: stream_info.audio_streams.len(),
+			})?;
 		Some(vec![stream.index])
 	} else {
 		// Default (Automatic/First)
@@ -131,12 +137,7 @@ fn run(args: Args) -> std::result::Result<(), DesilenceError> {
 	};
 
 	// Detect silence segments
-	let detection_result = silence::detect_silence(
-		&args.input,
-		&args.noise_threshold,
-		args.duration,
-		target_streams,
-	)?;
+	let detection_result = silence::detect_silence(&args.input, &args.noise_threshold, args.duration, target_streams)?;
 
 	// Check if any silence was detected
 	if detection_result.silence_segments.is_empty() {
@@ -190,7 +191,7 @@ fn run(args: Args) -> std::result::Result<(), DesilenceError> {
 
 	// Run the streaming pipeline
 	let config = PipelineConfig {
-		detection_stream_index: detection_stream_index,
+		detection_stream_index,
 		output_all_streams: true, // Output all audio streams (NUT supports it)
 	};
 

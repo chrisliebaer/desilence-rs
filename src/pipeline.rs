@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-
 use ffmpeg_next::{
 	self as ffmpeg,
 	codec,
@@ -317,15 +316,7 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 					let output_pts = current_output_pts.entry(mapping.output_index).or_insert(0);
 					let fps = video_dec.frame_rate();
 
-					write_raw_video_frame(
-						&mut octx, 
-						&decoded, 
-						mapping, 
-						output_pts, 
-						fps, 
-						packet.duration(),
-						&mut stats,
-					)?;
+					write_raw_video_frame(&mut octx, &decoded, mapping, output_pts, fps, packet.duration(), &mut stats)?;
 				}
 			},
 			media::Type::Audio => {
@@ -390,8 +381,6 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 				}
 			},
 		}
-
-
 	}
 
 	// Flush decoders
@@ -402,14 +391,9 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 		while video_dec.receive_frame(&mut decoded).is_ok() {
 			let output_pts = current_output_pts.entry(mapping.output_index).or_insert(0);
 			let fps = video_dec.frame_rate();
-			
+
 			write_raw_video_frame(
-				&mut octx,
-				&decoded,
-				mapping,
-				output_pts,
-				fps,
-				0, // No packet duration available during flush
+				&mut octx, &decoded, mapping, output_pts, fps, 0, // No packet duration available during flush
 				&mut stats,
 			)?;
 		}
@@ -546,7 +530,7 @@ fn write_raw_video_frame(
 
 	*current_pts += frame_duration;
 	stats.output_frames += 1;
-	
+
 	Ok(())
 }
 

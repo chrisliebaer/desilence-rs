@@ -330,7 +330,7 @@ mod tests {
 			Segment::new(SegmentType::Audible, 15.0, Some(20.0)),
 		];
 		let list = SegmentList::new(segments);
-		
+
 		assert_eq!(list.audible_count(), 2);
 		assert_eq!(list.silent_count(), 1);
 		assert!((list.total_audible_duration - 15.0).abs() < 0.001);
