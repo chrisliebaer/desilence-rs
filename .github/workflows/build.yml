@@ -115,6 +115,14 @@ jobs:
         name: desilence-rs-linux-static
         path: ./
 
+    - name: Debug - List files
+      run: |
+        echo "Current directory: $(pwd)"
+        echo "Files in current directory:"
+        ls -la
+        echo "Looking for desilence-rs:"
+        find . -name "desilence-rs" -type f 2>/dev/null || echo "Not found with find"
+
     - name: Make Binary Executable
       run: chmod +x desilence-rs
 
