@@ -151,14 +151,18 @@ Usage: desilence-rs [OPTIONS] --input <INPUT>
 Options:
   -i, --input <INPUT>
           Input video file path
+  -o, --output <OUTPUT>
+          Output file path (defaults to stdout)
   -n, --noise-threshold <NOISE_THRESHOLD>
           Silence detection threshold in dB (negative value) [default: -50dB]
   -d, --duration <DURATION>
           Minimum silence duration in seconds [default: 0.5]
   -a, --audio-stream <AUDIO_STREAM>
           Audio stream index to use for silence detection (0-based)
-      --merge-audio
-          Merge all audio streams for silence detection
+      --merge-audio [<MERGE_AUDIO>...]
+          Merge audio streams for silence detection
+  -f, --force
+          Force output to terminal even if it looks like a TTY
   -l, --list-streams
           List available streams and exit
   -v, --verbose...
