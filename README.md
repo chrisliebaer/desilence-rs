@@ -19,6 +19,12 @@ The core workflow creates a pipeline:
 
 The `-f nut` specifies the input format as `nut`, which is a low-overhead container used by `desilence-rs` to stream the raw video/audio data from `stdout`.
 
+> [!IMPORTANT]
+> **Preserving Multiple Streams**: FFmpeg defaults to selecting only the "best" video and audio stream (usually the first one). `desilence-rs` outputs **ALL** streams. To ensure the final output file contains all streams (e.g. multi-track audio), you **MUST** add `-map 0` to your ffmpeg command:
+> ```bash
+> ./desilence-rs ... | ffmpeg ... -map 0 ... output.mkv
+> ```
+
 ### Why Pipe?
 This design provides **maximum flexibility** compared to all-in-one tools:
 - **Zero Quality Loss**: Intermediate stream is raw/lossless.
@@ -58,7 +64,7 @@ Adjust the noise threshold (`-50dB` by default) and minimum silence period.
 
 ### Prerequisites
 - **Rust 1.70+**
-- **FFmpeg build dependencies** (Project builds FFmpeg from source statically)
+- **FFmpeg** (static or shared libraries, depending on build method)
 
 ### Building on Windows
 
@@ -112,20 +118,60 @@ Build a container that includes both the binary and a standalone ffmpeg:
 docker build -t desilence-rs .
 ```
 
+### Docker Usage
+
+You can use the Docker container in two main ways. Remember to use `--rm` for cleanup and bind mounts (`-v`) to access your files.
+
+#### 1. Streaming to Host FFmpeg
+Run `desilence-rs` inside the container but pipe the output to a local `ffmpeg` instance.
+This is ideal if your local ffmpeg has codecs and settings you want to use.
+
+```bash
+# Powershell example
+# Mount current directory ($PWD) to /data inside container
+docker run --rm -v ${PWD}:/data desilence-rs -i /data/input.mp4 | ffmpeg -f nut -i pipe: -map 0 -c copy output.mp4
+```
+
+#### 2. Full Processing Inside Container
+Run the entire pipeline inside the container. This uses the bundled ffmpeg.
+
+```bash
+# Run a shell command inside the container to execute the pipeline
+docker run --rm -v ${PWD}:/data --entrypoint /bin/sh desilence-rs -c "desilence-rs -i /data/input.mp4 | ffmpeg -f nut -i pipe: -map 0 -c:v libx264 -c:a aac /data/output.mp4"
+```
+
 ## Options
 
+<!-- BEGIN CLI OPTIONS -->
 ```text
+Remove silence from video files, streaming output to stdout
+
 Usage: desilence-rs [OPTIONS] --input <INPUT>
 
 Options:
-  -i, --input <INPUT>              Input video file path
-  -n, --noise-threshold <THRESHOLD> Silence detection threshold in dB [default: -50dB]
-  -d, --duration <SECONDS>         Minimum silence duration in seconds [default: 0.5]
-  -a, --audio-stream <INDEX>       Audio stream index for silence detection (0-based)
-      --merge-audio                Merge all audio streams for detection (expert)
-  -l, --list-streams              List available streams and exit
-  -v, --verbose                   Increase verbosity (-v, -vv, -vvv)
-  -q, --quiet                     Suppress non-error output
-  -h, --help                      Print help
-  -V, --version                   Print version
+  -i, --input <INPUT>
+          Input video file path
+  -o, --output <OUTPUT>
+          Output file path (defaults to stdout)
+  -n, --noise-threshold <NOISE_THRESHOLD>
+          Silence detection threshold in dB (negative value) [default: -50dB]
+  -d, --duration <DURATION>
+          Minimum silence duration in seconds [default: 0.5]
+  -a, --audio-stream <AUDIO_STREAM>
+          Audio stream index to use for silence detection (0-based)
+      --merge-audio [<MERGE_AUDIO>...]
+          Merge audio streams for silence detection
+  -f, --force
+          Force output to terminal even if it looks like a TTY
+  -l, --list-streams
+          List available streams and exit
+  -v, --verbose...
+          Verbose output (repeat for more verbosity: -v, -vv, -vvv)
+  -q, --quiet
+          Quiet mode - suppress all non-error output
+  -h, --help
+          Print help (see more with '--help')
+  -V, --version
+          Print version
 ```
+<!-- END CLI OPTIONS -->

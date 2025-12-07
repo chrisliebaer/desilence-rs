@@ -85,6 +85,14 @@ pub enum DesilenceError {
 	#[error("I/O error: {0}")]
 	#[diagnostic(code(desilence::io))]
 	Io(#[from] std::io::Error),
+
+	/// Refused to write binary output to terminal
+	#[error("Refused to write binary output to terminal")]
+	#[diagnostic(
+		code(desilence::terminal_output),
+		help("Use -f/--force to override, or redirect output to a file/pipe")
+	)]
+	TerminalOutput,
 }
 
 impl From<ffmpeg_next::Error> for DesilenceError {

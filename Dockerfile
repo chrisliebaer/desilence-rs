@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:latest as builder
+FROM rust:latest AS builder
 
 # Install build dependencies
 # ffmpeg-next requires libav*-dev for dynamic linking
@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 COPY . .
+
+# Run tests
+RUN cargo test --release
 
 # Build release binary
 RUN cargo build --release

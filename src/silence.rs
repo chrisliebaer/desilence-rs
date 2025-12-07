@@ -34,6 +34,8 @@ pub struct AudioStreamInfo {
 	pub channels: u16,
 	/// Stream duration in seconds (if known)
 	pub duration: Option<f64>,
+	/// Stream title/name (from metadata)
+	pub title: Option<String>,
 }
 
 /// Information about all streams in a file
@@ -48,17 +50,7 @@ pub struct StreamInfo {
 }
 
 /// Get information about streams in a file
-pub fn get_stream_info<P: AsRef<Path>>(path: P) -> Result<StreamInfo> {
-	let path = path.as_ref();
-
-	if !path.exists() {
-		return Err(DesilenceError::InputNotFound {
-			path: path.to_path_buf(),
-		});
-	}
-
-	let ictx = format::input(path)?;
-
+pub fn get_stream_info(ictx: &format::context::Input) -> Result<StreamInfo> {
 	let mut audio_streams = Vec::new();
 	let mut video_stream_index = None;
 
@@ -77,6 +69,13 @@ pub fn get_stream_info<P: AsRef<Path>>(path: P) -> Result<StreamInfo> {
 					None
 				};
 
+				let metadata = stream.metadata();
+				let title = metadata
+					.get("title")
+					.or_else(|| metadata.get("name"))
+					.or_else(|| metadata.get("language"))
+					.map(|s| s.to_string());
+
 				audio_streams.push(AudioStreamInfo {
 					index: stream.index(),
 					codec_name: decoder
@@ -86,6 +85,7 @@ pub fn get_stream_info<P: AsRef<Path>>(path: P) -> Result<StreamInfo> {
 					sample_rate: decoder.rate(),
 					channels: decoder.channels(),
 					duration,
+					title,
 				});
 			},
 			media::Type::Video => {
@@ -112,29 +112,19 @@ pub fn get_stream_info<P: AsRef<Path>>(path: P) -> Result<StreamInfo> {
 
 /// Print stream information to stderr
 pub fn print_stream_info(info: &StreamInfo) {
-	eprintln!("Stream Information:");
-	eprintln!("==================");
+	eprintln!("Available Audio Streams:");
 
-	if let Some(duration) = info.duration {
-		eprintln!("Total duration: {:.2}s", duration);
-	}
-
-	if let Some(idx) = info.video_stream_index {
-		eprintln!("Video stream: index {}", idx);
-	} else {
-		eprintln!("Video stream: none");
-	}
-
-	eprintln!("\nAudio streams ({}):", info.audio_streams.len());
 	for (i, audio) in info.audio_streams.iter().enumerate() {
+		let title_part = audio.title.as_ref().map(|t| format!(" \"{}\"", t)).unwrap_or_default();
+
 		eprintln!(
-			"  [{}] index={}, codec={}, {}Hz, {} channels{}",
+			"  [{}] {}{}, {}Hz, {} channels{}",
 			i,
-			audio.index,
 			audio.codec_name,
+			title_part,
 			audio.sample_rate,
 			audio.channels,
-			audio.duration.map(|d| format!(", {:.2}s", d)).unwrap_or_default()
+			audio.duration.map(|d| format!(", {:.2}s", d)).unwrap_or_default(),
 		);
 	}
 }
@@ -157,14 +147,13 @@ pub struct SilenceDetectionResult {
 /// * `path` - Path to input video file
 /// * `noise_threshold` - Silence threshold (e.g., "-50dB")
 /// * `duration` - Minimum silence duration in seconds
-/// * `audio_stream_index` - Which audio stream to analyze (None = first)
-/// * `merge_audio` - If true, merge all audio streams before detection
+/// * `target_streams` - Specific audio stream indices (absolute) to analyze. If None, the first audio stream is
+///   selected automatically. If multiple are provided, they are merged.
 pub fn detect_silence<P: AsRef<Path>>(
 	path: P,
 	noise_threshold: &str,
 	duration: f64,
-	audio_stream_index: Option<usize>,
-	merge_audio: bool,
+	target_streams: Option<Vec<usize>>,
 ) -> Result<SilenceDetectionResult> {
 	let path = path.as_ref();
 	info!(path = %path.display(), "Starting silence detection");
@@ -177,67 +166,68 @@ pub fn detect_silence<P: AsRef<Path>>(
 
 	let mut ictx = format::input(path)?;
 
-	// Find the audio stream to use
-	let stream_info = get_stream_info(path)?;
+	// Find the audio streams to use
+	let stream_info = get_stream_info(&ictx)?;
 
 	if stream_info.audio_streams.is_empty() {
 		return Err(DesilenceError::NoAudioStream);
 	}
 
-	let target_stream = if merge_audio {
-		warn!("Merge audio mode not yet implemented, using first stream");
-		// TODO: Implement audio stream merging using amerge filter
-		&stream_info.audio_streams[0]
-	} else if let Some(idx) = audio_stream_index {
-		stream_info
-			.audio_streams
-			.iter()
-			.find(|s| s.index == idx)
-			.ok_or(DesilenceError::InvalidAudioStreamIndex {
-				index: idx,
-				count: stream_info.audio_streams.len(),
-			})?
+	// Determine target streams
+	let selected_streams: Vec<&AudioStreamInfo> = if let Some(indices) = target_streams {
+		if indices.is_empty() {
+			return Err(DesilenceError::InvalidAudioStreamIndex {
+				index: 0,
+				count: 0,
+			});
+		}
+		let mut selected = Vec::new();
+		for idx in indices {
+			let stream = stream_info
+				.audio_streams
+				.iter()
+				.find(|s| s.index == idx)
+				.ok_or(DesilenceError::InvalidAudioStreamIndex {
+					index: idx,
+					count: stream_info.audio_streams.len(),
+				})?;
+			selected.push(stream);
+		}
+		selected
 	} else {
-		&stream_info.audio_streams[0]
+		// Default: Use the first available audio stream
+		vec![&stream_info.audio_streams[0]]
 	};
 
-	info!(
-			stream_index = target_stream.index,
-			codec = %target_stream.codec_name,
-			sample_rate = target_stream.sample_rate,
-			channels = target_stream.channels,
-			"Using audio stream"
-	);
+	// Format stream names for logging
+	let stream_names: Vec<String> = selected_streams
+		.iter()
+		.map(|s| {
+			let title = s.title.as_deref().unwrap_or("untitled");
+			format!("Audio Stream #{} \"{}\"", s.index, title)
+		})
+		.collect();
 
-	// Set up decoder for the audio stream
-	let stream = ictx.stream(target_stream.index).unwrap();
-	let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
-	let mut decoder = context.decoder().audio()?;
+	info!("Analyzing streams: {}", stream_names.join(", "));
 
-	// Create filter graph for silence detection
-	let mut filter_graph = filter::Graph::new();
+	// Parse threshold into numeric dB value
+	let threshold_db = parse_threshold(noise_threshold)?;
 
-	// Input buffer filter
-	let abuffer_args = format!(
-		"time_base={}:sample_rate={}:sample_fmt={}:channel_layout=0x{:x}",
-		stream.time_base(),
-		decoder.rate(),
-		decoder.format().name(),
-		decoder.channel_layout().bits()
-	);
+	// Setup decoders map
+	use std::collections::HashMap;
+	let mut decoders: HashMap<usize, ffmpeg::decoder::Audio> = HashMap::new();
 
-	debug!(args = %abuffer_args, "Creating abuffer filter");
+	for target in &selected_streams {
+		let stream = ictx.stream(target.index).unwrap();
+		let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
+		let decoder = context.decoder().audio()?;
+		decoders.insert(target.index, decoder);
+	}
 
-	filter_graph.add(
-		&filter::find("abuffer").ok_or_else(|| DesilenceError::FilterGraph {
-			message: "abuffer filter not found".to_string(),
-		})?,
-		"in",
-		&abuffer_args,
-	)?;
+	// use a filter graph to unify the code path.
+	let mut graph = filter::Graph::new();
 
-	// Output buffer sink
-	filter_graph.add(
+	graph.add(
 		&filter::find("abuffersink").ok_or_else(|| DesilenceError::FilterGraph {
 			message: "abuffersink filter not found".to_string(),
 		})?,
@@ -245,107 +235,174 @@ pub fn detect_silence<P: AsRef<Path>>(
 		"",
 	)?;
 
-	// Connect filters with silencedetect in the middle
-	// The filter spec is: silencedetect=n=<threshold>:d=<duration>
-	let silencedetect_spec = format!("silencedetect=n={}:d={}", noise_threshold, duration);
-	debug!(spec = %silencedetect_spec, "Creating filter chain");
+	for target in &selected_streams {
+		let decoder = decoders.get(&target.index).unwrap();
+		let args = format!(
+			"time_base={}:sample_rate={}:sample_fmt={}:channel_layout=0x{:x}",
+			ictx.stream(target.index).unwrap().time_base(),
+			decoder.rate(),
+			decoder.format().name(),
+			decoder.channel_layout().bits()
+		);
 
-	filter_graph.output("in", 0)?.input("out", 0)?.parse(&silencedetect_spec)?;
+		let name = format!("in_{}", target.index);
+		graph.add(
+			&filter::find("abuffer").ok_or_else(|| DesilenceError::FilterGraph {
+				message: "abuffer filter not found".to_string(),
+			})?,
+			&name,
+			&args,
+		)?;
+	}
 
-	filter_graph.validate()?;
+	// Add silencedetect filter
+	let silencedetect_args = format!("noise={}dB:d={}", threshold_db, duration);
+	let silencedetect_name = "silencedetect";
+	graph.add(
+		&filter::find("silencedetect").ok_or_else(|| DesilenceError::FilterGraph {
+			message: "silencedetect filter not found".to_string(),
+		})?,
+		silencedetect_name,
+		&silencedetect_args,
+	)?;
 
-	debug!(graph = %filter_graph.dump(), "Filter graph created");
+	// Connect silencedetect -> sink
+	let mut sink = graph.get("out").unwrap();
+	let mut silencedetect = graph.get(silencedetect_name).unwrap();
+	silencedetect.link(0, &mut sink, 0);
 
-	// Parse threshold once at the start for proper error handling
-	let threshold_linear = parse_threshold(noise_threshold)?;
+	// Connect inputs -> [Amerge] -> silencedetect
+	if selected_streams.len() > 1 {
+		let amerge_name = "merge";
+		graph.add(
+			&filter::find("amerge").ok_or_else(|| DesilenceError::FilterGraph {
+				message: "amerge filter not found".to_string(),
+			})?,
+			amerge_name,
+			&format!("inputs={}", selected_streams.len()),
+		)?;
 
-	// Process audio frames and collect silence segments
+		let mut amerge = graph.get(amerge_name).unwrap();
+		amerge.link(0, &mut silencedetect, 0);
+
+		for (i, target) in selected_streams.iter().enumerate() {
+			let name = format!("in_{}", target.index);
+			let mut source = graph.get(&name).unwrap();
+			source.link(0, &mut amerge, i as u32);
+		}
+	} else {
+		let target = selected_streams[0];
+		let name = format!("in_{}", target.index);
+		let mut source = graph.get(&name).unwrap();
+		source.link(0, &mut silencedetect, 0);
+	}
+
+	graph.validate().map_err(|e| DesilenceError::FilterGraph {
+		message: format!("Filter graph validation failed: {}", e),
+	})?;
+
+	let mut sink = graph.get("out").ok_or_else(|| DesilenceError::FilterGraph {
+		message: "Sink 'out' not found after graph validation".to_string(),
+	})?;
+
+	// Pair every decoder with its corresponding graph source context.
+	let mut processors: HashMap<usize, (ffmpeg::decoder::Audio, ffmpeg::filter::Context)> = HashMap::with_capacity(decoders.len());
+	for (index, decoder) in decoders {
+		let name = format!("in_{}", index);
+		let source = graph.get(&name).ok_or_else(|| DesilenceError::FilterGraph {
+			message: format!("Source {} not found after graph validation", name),
+		})?;
+		processors.insert(index, (decoder, source));
+	}
+
+	// Process loop
 	let mut silence_segments: Vec<(f64, Option<f64>)> = Vec::new();
 	let mut current_silence_start: Option<f64> = None;
 	let mut total_silence_duration = 0.0;
 	let mut frame_count = 0u64;
 
-	// We need to capture filter metadata - unfortunately rust-ffmpeg doesn't expose
-	// the silencedetect metadata directly. We'll need to parse it from the side data
-	// or use an alternative approach.
-	//
-	// The silencedetect filter outputs to stderr in ffmpeg CLI, but as a library
-	// we need to capture the AVFrame metadata or use a custom approach.
-	//
-	// Alternative: We'll implement our own silence detection by analyzing audio levels.
+	info!("Processing audio frames for silence detection via silencedetect filter...");
 
-	info!("Processing audio frames for silence detection...");
-
-	let in_time_base = stream.time_base();
-
-	for (stream_iter, packet) in ictx.packets() {
-		if stream_iter.index() != target_stream.index {
-			continue;
-		}
-
-		decoder.send_packet(&packet)?;
-
-		let mut decoded = frame::Audio::empty();
-		while decoder.receive_frame(&mut decoded).is_ok() {
+	// We'll use a closure to process filter output frames
+	let mut process_filter_output = |sink: &mut ffmpeg::filter::Context| -> Result<()> {
+		let mut filtered = frame::Audio::empty();
+		while sink.sink().frame(&mut filtered).is_ok() {
 			frame_count += 1;
 
-			// Get timestamp
-			let pts = decoded.pts().unwrap_or(0);
-			let timestamp = pts as f64 * f64::from(in_time_base);
+			let metadata = filtered.metadata();
 
-			// Analyze audio level using pre-parsed threshold
-			let is_silent = is_frame_silent(&decoded, threshold_linear);
-
-			trace!(
-				frame = frame_count,
-				pts = pts,
-				timestamp = timestamp,
-				silent = is_silent,
-				"Processed audio frame"
-			);
-
-			// Track silence segments
-			match (current_silence_start, is_silent) {
-				(None, true) => {
-					// Starting silence
-					current_silence_start = Some(timestamp);
-					trace!(timestamp, "Silence started");
-				},
-				(Some(start), false) => {
-					// Ending silence
-					let silence_duration = timestamp - start;
-					if silence_duration >= duration {
-						silence_segments.push((start, Some(timestamp)));
-						total_silence_duration += silence_duration;
-						debug!(
-							start,
-							end = timestamp,
-							duration = silence_duration,
-							"Detected silence segment"
-						);
+			// Check for silence start
+			if let Some(start_str) = metadata.get("lavfi.silence_start") {
+				if let Ok(start) = start_str.parse::<f64>() {
+					if current_silence_start.is_none() {
+						current_silence_start = Some(start);
+						trace!(start, "Silence start flagged");
 					}
-					current_silence_start = None;
-				},
-				_ => {},
+				}
+			}
+
+			// Check for silence duration (end of silence)
+			if let Some(duration_str) = metadata.get("lavfi.silence_duration") {
+				if let Ok(duration) = duration_str.parse::<f64>() {
+					if let Some(start) = current_silence_start {
+						silence_segments.push((start, Some(start + duration)));
+						total_silence_duration += duration;
+						debug!(start, duration, "Detected silence segment");
+						current_silence_start = None;
+					} else {
+						// Found duration without start.
+						warn!("Found silence duration without start track at frame {}", frame_count);
+					}
+				}
+			}
+		}
+		Ok(())
+	};
+
+	for (stream_iter, packet) in ictx.packets() {
+		// Fast lookup: do we have a processor (decoder + source) for this stream index?
+		if let Some((decoder, source)) = processors.get_mut(&stream_iter.index()) {
+			decoder.send_packet(&packet)?;
+
+			let mut decoded = frame::Audio::empty();
+			while decoder.receive_frame(&mut decoded).is_ok() {
+				source.source().add(&decoded).map_err(|e| DesilenceError::FilterGraph {
+					message: format!("Failed to add frame to source: {}", e),
+				})?;
+
+				process_filter_output(&mut sink)?;
 			}
 		}
 	}
 
-	// Flush decoder
-	decoder.send_eof()?;
-	let mut decoded = frame::Audio::empty();
-	while decoder.receive_frame(&mut decoded).is_ok() {
-		frame_count += 1;
+	// Flush decoders
+	for (_, (decoder, source)) in processors.iter_mut() {
+		decoder.send_eof()?;
+		let mut decoded = frame::Audio::empty();
+		while decoder.receive_frame(&mut decoded).is_ok() {
+			source.source().add(&decoded).ok(); // Best effort flush
+
+			process_filter_output(&mut sink)?;
+		}
+
+		// Flush filter sources
+		source.source().flush().ok();
 	}
 
-	// Handle case where file ends in silence
+	// Final flush of the graph sink
+	process_filter_output(&mut sink)?;
+
+	// Handle case where file ends in silence (trailing silence)
 	if let Some(start) = current_silence_start {
-		let silence_duration = stream_info.duration.map(|d| d - start);
-		if silence_duration.is_none_or(|d| d >= duration) {
+		let calc_duration = if let Some(d) = stream_info.duration {
+			(d - start).max(0.0)
+		} else {
+			0.0
+		};
+
+		if calc_duration >= duration {
 			silence_segments.push((start, stream_info.duration));
-			if let Some(d) = silence_duration {
-				total_silence_duration += d;
-			}
+			total_silence_duration += calc_duration;
 			debug!(start, end = ?stream_info.duration, "Detected silence at end of file");
 		}
 	}
@@ -364,75 +421,9 @@ pub fn detect_silence<P: AsRef<Path>>(
 	})
 }
 
-/// Check if an audio frame is silent based on threshold.
-/// This is a simplified implementation that checks max amplitude.
+/// Parse a dB threshold string (e.g., "-50dB" or "-50") into numeric dB value.
 ///
-/// # Arguments
-/// * `frame` - The audio frame to analyze
-/// * `threshold_linear` - The linear amplitude threshold (pre-converted from dB)
-fn is_frame_silent(frame: &frame::Audio, threshold_linear: f64) -> bool {
-	// Get audio samples and calculate max amplitude
-	// Handle different sample formats
-	let plane_count = frame.planes();
-	if plane_count == 0 {
-		return true;
-	}
-
-	// Simple approach: check if any sample exceeds threshold
-	// We'll work with the first plane (works for both planar and interleaved)
-	let samples = frame.samples();
-	if samples == 0 {
-		return true;
-	}
-
-	// Try to read as f32 planar (common format after filtering)
-	let data = frame.data(0);
-	if data.is_empty() {
-		return true;
-	}
-
-	// Calculate max amplitude for this frame based on sample format
-	let format = frame.format();
-	let max_amplitude = match format {
-		format::Sample::I16(_) => data
-			.chunks_exact(2)
-			.map(|c| i16::from_ne_bytes(c.try_into().unwrap()))
-			.map(|s| (s as f64 / i16::MAX as f64).abs())
-			.fold(0.0_f64, |a, b| a.max(b)),
-		format::Sample::I32(_) => data
-			.chunks_exact(4)
-			.map(|c| i32::from_ne_bytes(c.try_into().unwrap()))
-			.map(|s| (s as f64 / i32::MAX as f64).abs())
-			.fold(0.0_f64, |a, b| a.max(b)),
-		format::Sample::F32(_) => data
-			.chunks_exact(4)
-			.map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
-			.map(|s| (s as f64).abs())
-			.fold(0.0_f64, |a, b| a.max(b)),
-		format::Sample::F64(_) => data
-			.chunks_exact(8)
-			.map(|c| f64::from_ne_bytes(c.try_into().unwrap()))
-			.map(|s| s.abs())
-			.fold(0.0_f64, |a, b| a.max(b)),
-		format::Sample::U8(_) => {
-			// U8 is centered at 128
-			data
-				.iter()
-				.map(|&s| ((s as f64 - 128.0) / 128.0).abs())
-				.fold(0.0_f64, |a, b| a.max(b))
-		},
-		_ => {
-			// Unknown format, assume not silent to avoid masking content
-			return false;
-		},
-	};
-
-	max_amplitude < threshold_linear
-}
-
-/// Parse a dB threshold string (e.g., "-50dB" or "-50") into linear amplitude.
-///
-/// Returns the linear amplitude value (0.0 to 1.0 scale).
+/// Returns the dB value (e.g. -50.0).
 pub fn parse_threshold(threshold: &str) -> Result<f64> {
 	let threshold_str = threshold
 		.trim()
@@ -444,16 +435,9 @@ pub fn parse_threshold(threshold: &str) -> Result<f64> {
 		value: threshold.to_string(),
 	})?;
 
-	// Convert dB to linear amplitude: 10^(dB/20)
-	let threshold_linear = 10.0_f64.powf(threshold_db / 20.0);
+	debug!(threshold_db = threshold_db, "Parsed noise threshold");
 
-	debug!(
-		threshold_db = threshold_db,
-		threshold_linear = threshold_linear,
-		"Parsed noise threshold"
-	);
-
-	Ok(threshold_linear)
+	Ok(threshold_db)
 }
 
 #[cfg(test)]
@@ -464,16 +448,16 @@ mod tests {
 	fn test_threshold_parsing_valid() {
 		// Test various valid threshold formats
 		let linear = parse_threshold("-50dB").unwrap();
-		assert!((linear - 0.00316).abs() < 0.001);
+		assert!((linear - -50.0).abs() < 0.001);
 
 		let linear = parse_threshold("-50db").unwrap();
-		assert!((linear - 0.00316).abs() < 0.001);
+		assert!((linear - -50.0).abs() < 0.001);
 
 		let linear = parse_threshold("-50").unwrap();
-		assert!((linear - 0.00316).abs() < 0.001);
+		assert!((linear - -50.0).abs() < 0.001);
 
 		let linear = parse_threshold("  -30dB  ").unwrap();
-		assert!((linear - 0.0316).abs() < 0.001);
+		assert!((linear - -30.0).abs() < 0.001);
 	}
 
 	#[test]

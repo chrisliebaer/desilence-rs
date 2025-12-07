@@ -16,6 +16,10 @@ pub struct Args {
 	#[arg(short, long)]
 	pub input: PathBuf,
 
+	/// Output file path (defaults to stdout)
+	#[arg(short, long)]
+	pub output: Option<PathBuf>,
+
 	/// Silence detection threshold in dB (negative value)
 	///
 	/// Audio below this level is considered silence.
@@ -35,12 +39,16 @@ pub struct Args {
 	#[arg(short = 'a', long)]
 	pub audio_stream: Option<usize>,
 
-	/// Merge all audio streams for silence detection
+	/// Merge audio streams for silence detection
 	///
-	/// Expert option: combines all audio streams before detection.
-	/// Useful when silence might only be present in some channels.
-	#[arg(long, conflicts_with = "audio_stream")]
-	pub merge_audio: bool,
+	/// If no indices are provided, merges all available audio streams.
+	/// Can also specify specific stream indices (e.g., --merge-audio 0,2).
+	#[arg(long, value_delimiter = ',', num_args = 0.., conflicts_with = "audio_stream")]
+	pub merge_audio: Option<Vec<usize>>,
+
+	/// Force output to terminal even if it looks like a TTY
+	#[arg(short, long)]
+	pub force: bool,
 
 	/// List available streams and exit
 	#[arg(short = 'l', long)]
@@ -83,7 +91,7 @@ mod tests {
 		assert_eq!(args.noise_threshold, "-50dB");
 		assert_eq!(args.duration, 0.5);
 		assert!(args.audio_stream.is_none());
-		assert!(!args.merge_audio);
+		assert!(args.merge_audio.is_none());
 		assert!(!args.list_streams);
 		assert_eq!(args.verbose, 0);
 		assert!(!args.quiet);

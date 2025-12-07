@@ -2,9 +2,11 @@
 # Run with: 
 #   .\build.ps1          (CI/Clean mode: Downloads gyan.dev ffmpeg)
 #   .\build.ps1 -Local   (Local mode: Uses existing VCPKG/system ffmpeg)
+#   .\build.ps1 -RunTests (Run tests after build)
 
 param (
-	[switch]$Local
+	[switch]$Local,
+	[switch]$RunTests
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,6 +87,17 @@ cargo build --release
 
 if ($LASTEXITCODE -eq 0) {
 	Write-Host "Build successful!" -ForegroundColor Green
+	
+	if ($RunTests) {
+		Write-Host "Running tests..." -ForegroundColor Cyan
+		cargo test --release
+		
+		if ($LASTEXITCODE -ne 0) {
+			Write-Error "Tests failed with exit code $LASTEXITCODE"
+			exit $LASTEXITCODE
+		}
+		Write-Host "Tests passed!" -ForegroundColor Green
+	}
 	
 	# Copy DLLs to release folder
 	$targetDir = Join-Path $PSScriptRoot "target\release"

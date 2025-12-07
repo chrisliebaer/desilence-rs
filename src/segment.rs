@@ -322,4 +322,19 @@ mod tests {
 		assert!(seg.contains(5.0));
 		assert!(seg.contains(100.0)); // no end means goes forever
 	}
+	#[test]
+	fn test_segment_list_stats() {
+		let segments = vec![
+			Segment::new(SegmentType::Audible, 0.0, Some(10.0)),
+			Segment::new(SegmentType::Silent, 10.0, Some(15.0)),
+			Segment::new(SegmentType::Audible, 15.0, Some(20.0)),
+		];
+		let list = SegmentList::new(segments);
+
+		assert_eq!(list.audible_count(), 2);
+		assert_eq!(list.silent_count(), 1);
+		assert!((list.total_audible_duration - 15.0).abs() < 0.001);
+		assert!((list.total_silent_duration - 5.0).abs() < 0.001);
+		assert!(list.has_audible());
+	}
 }
