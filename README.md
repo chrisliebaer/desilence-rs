@@ -19,6 +19,12 @@ The core workflow creates a pipeline:
 
 The `-f nut` specifies the input format as `nut`, which is a low-overhead container used by `desilence-rs` to stream the raw video/audio data from `stdout`.
 
+> [!IMPORTANT]
+> **Preserving Multiple Streams**: FFmpeg defaults to selecting only the "best" video and audio stream (usually the first one). `desilence-rs` outputs **ALL** streams. To ensure the final output file contains all streams (e.g. multi-track audio), you **MUST** add `-map 0` to your ffmpeg command:
+> ```bash
+> ./desilence-rs ... | ffmpeg ... -map 0 ... output.mkv
+> ```
+
 ### Why Pipe?
 This design provides **maximum flexibility** compared to all-in-one tools:
 - **Zero Quality Loss**: Intermediate stream is raw/lossless.
@@ -110,6 +116,28 @@ If you have `vcpkg` installed and want to use your system libraries:
 Build a container that includes both the binary and a standalone ffmpeg:
 ```bash
 docker build -t desilence-rs .
+```
+
+### Docker Usage
+
+You can use the Docker container in two main ways. Remember to use `--rm` for cleanup and bind mounts (`-v`) to access your files.
+
+#### 1. Streaming to Host FFmpeg
+Run `desilence-rs` inside the container but pipe the output to a local `ffmpeg` instance.
+This is ideal if your local ffmpeg has codecs and settings you want to use.
+
+```bash
+# Powershell example
+# Mount current directory ($PWD) to /data inside container
+docker run --rm -v ${PWD}:/data desilence-rs -i /data/input.mp4 | ffmpeg -f nut -i pipe: -map 0 -c copy output.mp4
+```
+
+#### 2. Full Processing Inside Container
+Run the entire pipeline inside the container. This uses the bundled ffmpeg.
+
+```bash
+# Run a shell command inside the container to execute the pipeline
+docker run --rm -v ${PWD}:/data --entrypoint /bin/sh desilence-rs -c "desilence-rs -i /data/input.mp4 | ffmpeg -f nut -i pipe: -map 0 -c:v libx264 -c:a aac /data/output.mp4"
 ```
 
 ## Options
