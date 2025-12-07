@@ -105,14 +105,14 @@ jobs:
 
   validate-readme:
     runs-on: ubuntu-latest
-    needs: build-linux-dynamic
+    needs: build-linux-static
     steps:
     - uses: actions/checkout@v4
 
     - name: Download Linux Binary
       uses: actions/download-artifact@v4
       with:
-        name: desilence-rs-linux-dynamic
+        name: desilence-rs-linux-static
         path: ./
 
     - name: Make Binary Executable

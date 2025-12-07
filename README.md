@@ -116,18 +116,30 @@ docker build -t desilence-rs .
 
 <!-- BEGIN CLI OPTIONS -->
 ```text
+Remove silence from video files, streaming output to stdout
+
 Usage: desilence-rs [OPTIONS] --input <INPUT>
 
 Options:
-  -i, --input <INPUT>              Input video file path
-  -n, --noise-threshold <THRESHOLD> Silence detection threshold in dB [default: -50dB]
-  -d, --duration <SECONDS>         Minimum silence duration in seconds [default: 0.5]
-  -a, --audio-stream <INDEX>       Audio stream index for silence detection (0-based)
-      --merge-audio                Merge all audio streams for detection (expert)
-  -l, --list-streams              List available streams and exit
-  -v, --verbose                   Increase verbosity (-v, -vv, -vvv)
-  -q, --quiet                     Suppress non-error output
-  -h, --help                      Print help
-  -V, --version                   Print version
+  -i, --input <INPUT>
+          Input video file path
+  -n, --noise-threshold <NOISE_THRESHOLD>
+          Silence detection threshold in dB (negative value) [default: -50dB]
+  -d, --duration <DURATION>
+          Minimum silence duration in seconds [default: 0.5]
+  -a, --audio-stream <AUDIO_STREAM>
+          Audio stream index to use for silence detection (0-based)
+      --merge-audio
+          Merge all audio streams for silence detection
+  -l, --list-streams
+          List available streams and exit
+  -v, --verbose...
+          Verbose output (repeat for more verbosity: -v, -vv, -vvv)
+  -q, --quiet
+          Quiet mode - suppress all non-error output
+  -h, --help
+          Print help (see more with '--help')
+  -V, --version
+          Print version
 ```
 <!-- END CLI OPTIONS -->
