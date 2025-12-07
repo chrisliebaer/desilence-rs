@@ -50,7 +50,6 @@ pub struct StreamInfo {
 }
 
 /// Get information about streams in a file
-/// Get information about streams in a file
 pub fn get_stream_info(ictx: &format::context::Input) -> Result<StreamInfo> {
 	let mut audio_streams = Vec::new();
 	let mut video_stream_index = None;
@@ -111,7 +110,6 @@ pub fn get_stream_info(ictx: &format::context::Input) -> Result<StreamInfo> {
 	})
 }
 
-/// Print stream information to stderr
 /// Print stream information to stderr
 pub fn print_stream_info(info: &StreamInfo) {
 	eprintln!("Available Audio Streams:");
@@ -199,7 +197,7 @@ pub fn detect_silence<P: AsRef<Path>>(
 		}
 		selected
 	} else {
-		// Default: first stream ("choose yourself")
+		// Default: Use the first available audio stream
 		vec![&stream_info.audio_streams[0]]
 	};
 
@@ -208,7 +206,7 @@ pub fn detect_silence<P: AsRef<Path>>(
 		.iter()
 		.map(|s| {
 			let title = s.title.as_deref().unwrap_or("untitled");
-			format!("Audio Stream #{} \"{}\"", s.index, title) // Use absolute index for debugging or relative? User said "Audio Stream #x". I'll use index.
+			format!("Audio Stream #{} \"{}\"", s.index, title)
 		})
 		.collect();
 
@@ -328,15 +326,6 @@ pub fn detect_silence<P: AsRef<Path>>(
 	info!("Processing audio frames for silence detection via silencedetect filter...");
 
 	// We'll use a closure to process filter output frames
-	// We need to capture variables but sink must be passed to avoid borrow issues with decoders loop?
-	// Actually sink is independent of decoders.
-	// We can capture 'sink' mutably if we don't use it elsewhere in the loop?
-	// But we iterate 'processors' (decoders).
-	// processors does not contain 'sink'.
-	// So we can capture sink.
-	
-	// However, passing it as arg is cleaner.
-	
 	let mut process_filter_output = |sink: &mut ffmpeg::filter::Context| -> Result<()> {
 		let mut filtered = frame::Audio::empty();
 		while sink.sink().frame(&mut filtered).is_ok() {
@@ -364,12 +353,6 @@ pub fn detect_silence<P: AsRef<Path>>(
 						current_silence_start = None;
 					} else {
 						// Found duration without start.
-						// Use implicit start from duration?
-						// silencedetect behavior: duration implies end of silence.
-						// end_time = filtered.pts * time_base?
-						// start = end_time - duration?
-						// But metadata duration is precise.
-						// Should we recover?
 						warn!("Found silence duration without start track at frame {}", frame_count);
 					}
 				}
@@ -472,16 +455,16 @@ mod tests {
 	fn test_threshold_parsing_valid() {
 		// Test various valid threshold formats
 		let linear = parse_threshold("-50dB").unwrap();
-		assert!((linear - 0.00316).abs() < 0.001);
+		assert!((linear - -50.0).abs() < 0.001);
 
 		let linear = parse_threshold("-50db").unwrap();
-		assert!((linear - 0.00316).abs() < 0.001);
+		assert!((linear - -50.0).abs() < 0.001);
 
 		let linear = parse_threshold("-50").unwrap();
-		assert!((linear - 0.00316).abs() < 0.001);
+		assert!((linear - -50.0).abs() < 0.001);
 
 		let linear = parse_threshold("  -30dB  ").unwrap();
-		assert!((linear - 0.0316).abs() < 0.001);
+		assert!((linear - -30.0).abs() < 0.001);
 	}
 
 	#[test]

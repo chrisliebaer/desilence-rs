@@ -42,7 +42,7 @@ fn main() -> Result<()> {
 	let args = Args::parse();
 
 	// Mute FFmpeg raw logs (e.g. silencedetect info) so they don't clutter stderr,
-	// unless verbose logging is requested which typically implies user wants to see everything.
+	// unless verbose logging is requested.
 	if args.log_level() < LevelFilter::DEBUG {
 		ffmpeg::log::set_level(ffmpeg::log::Level::Warning);
 	}

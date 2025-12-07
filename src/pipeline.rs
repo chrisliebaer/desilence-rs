@@ -413,7 +413,7 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 						// Resample/Convert frame to packed format
 						let mut resampled_frame = frame::Audio::empty();
 
-						// Let the resampler handle details, just run it
+						// Perform resampling
 						if let Some(resampler) = audio_resamplers.get_mut(&ist_index) {
 							resampler.run(&decoded, &mut resampled_frame)?;
 						}
@@ -453,7 +453,7 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 			},
 			_ => {
 				if is_packet_audible {
-					// Similar logic for other streams if needed, or just skipping
+					// Handle other streams if needed
 				}
 			},
 		}
@@ -492,9 +492,6 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 
 /// Create an output context writing to stdout in NUT format
 fn create_stdout_output() -> Result<format::context::Output> {
-	// SAFETY: We use "nut" format explicitly because simple "pipe:1" output detection might fail
-	// or default to mpegts which we don't want.
-	// ffmpeg-next exposes output_as which calls avformat_alloc_output_context2 safely.
 	Ok(format::output_as(&"pipe:1", "nut")?)
 }
 
@@ -518,5 +515,30 @@ impl PipelineStats {
 		} else {
 			(self.output_packets as f64 / total as f64) * 100.0
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_pipeline_stats_percentage() {
+		let stats = PipelineStats {
+			output_frames: 0,
+			output_packets: 50,
+			dropped_packets: 50,
+		};
+		assert!((stats.kept_percentage() - 50.0).abs() < 0.001);
+
+		let stats_empty = PipelineStats::default();
+		assert!((stats_empty.kept_percentage() - 100.0).abs() < 0.001);
+
+		let stats_full = PipelineStats {
+			output_frames: 10,
+			output_packets: 100,
+			dropped_packets: 0,
+		};
+		assert!((stats_full.kept_percentage() - 100.0).abs() < 0.001);
 	}
 }
