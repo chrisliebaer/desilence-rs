@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:latest as builder
+FROM rust:latest AS builder
 
 # Install build dependencies
 # ffmpeg-next requires libav*-dev for dynamic linking
