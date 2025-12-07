@@ -4,6 +4,7 @@ use std::path::Path;
 
 use ffmpeg_next::{
 	self as ffmpeg,
+	filter,
 	format,
 	frame,
 	media,
@@ -163,7 +164,7 @@ pub fn detect_silence<P: AsRef<Path>>(
 	noise_threshold: &str,
 	duration: f64,
 	audio_stream_index: Option<usize>,
-	merge_audio: bool,
+	merge_audio: Option<Vec<usize>>,
 ) -> Result<SilenceDetectionResult> {
 	let path = path.as_ref();
 	info!(path = %path.display(), "Starting silence detection");
@@ -176,48 +177,142 @@ pub fn detect_silence<P: AsRef<Path>>(
 
 	let mut ictx = format::input(path)?;
 
-	// Find the audio stream to use
+	// Find the audio streams to use
 	let stream_info = get_stream_info(path)?;
 
 	if stream_info.audio_streams.is_empty() {
 		return Err(DesilenceError::NoAudioStream);
 	}
 
-	let target_stream = if merge_audio {
-		warn!("Merge audio mode not yet implemented, using first stream");
-		// TODO: Implement audio stream merging using amerge filter
-		&stream_info.audio_streams[0]
+	// Determine target streams
+	let target_streams: Vec<&AudioStreamInfo> = if let Some(indices) = merge_audio {
+		if indices.is_empty() {
+			// Merge all audio streams
+			stream_info.audio_streams.iter().collect()
+		} else {
+			// Merge specific streams
+			let mut selected = Vec::new();
+			for &idx in &indices {
+				let stream = stream_info
+					.audio_streams
+					.iter()
+					.find(|s| s.index == idx)
+					.ok_or(DesilenceError::InvalidAudioStreamIndex {
+						index: idx,
+						count: stream_info.audio_streams.len(),
+					})?;
+				selected.push(stream);
+			}
+			selected
+		}
 	} else if let Some(idx) = audio_stream_index {
-		stream_info
+		// Single stream mode
+		let stream = stream_info
 			.audio_streams
 			.iter()
 			.find(|s| s.index == idx)
 			.ok_or(DesilenceError::InvalidAudioStreamIndex {
 				index: idx,
 				count: stream_info.audio_streams.len(),
-			})?
+			})?;
+		vec![stream]
 	} else {
-		&stream_info.audio_streams[0]
+		// Default: first stream
+		vec![&stream_info.audio_streams[0]]
 	};
 
+	let use_filter_graph = target_streams.len() > 1;
+
 	info!(
-			stream_index = target_stream.index,
-			codec = %target_stream.codec_name,
-			sample_rate = target_stream.sample_rate,
-			channels = target_stream.channels,
-			"Using audio stream"
+		count = target_streams.len(),
+		indices = ?target_streams.iter().map(|s| s.index).collect::<Vec<_>>(),
+		"Analyzing audio streams"
 	);
 
-	// Set up decoder for the audio stream
-	let stream = ictx.stream(target_stream.index).unwrap();
-	let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
-	let mut decoder = context.decoder().audio()?;
-
-
-	// Parse threshold once at the start for proper error handling
+	// Parse threshold once at the start
 	let threshold_linear = parse_threshold(noise_threshold)?;
 
-	// Process audio frames and collect silence segments
+	// Setup decoders map
+	use std::collections::HashMap;
+	let mut decoders: HashMap<usize, ffmpeg::decoder::Audio> = HashMap::new();
+	
+	for target in &target_streams {
+		let stream = ictx.stream(target.index).unwrap();
+		let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
+		let decoder = context.decoder().audio()?;
+		decoders.insert(target.index, decoder);
+	}
+
+	// ALWAYS use a filter graph to unify the code path.
+	// Even for a single stream, we pass it through the graph.
+	let mut graph = filter::Graph::new();
+	let mut amerge_inputs = String::new();
+	
+	for target in &target_streams {
+		let decoder = decoders.get(&target.index).unwrap();
+		
+		let args = format!(
+			"time_base={}:sample_rate={}:sample_fmt={}:channel_layout=0x{:x}",
+			ictx.stream(target.index).unwrap().time_base(),
+			decoder.rate(),
+			decoder.format().name(),
+			decoder.channel_layout().bits()
+		);
+		
+		let name = format!("in_{}", target.index);
+		graph.add(
+			&filter::find("abuffer").ok_or_else(|| DesilenceError::FilterGraph {
+				message: "abuffer filter not found".to_string(),
+			})?,
+			&name,
+			&args,
+		)?;
+		
+		amerge_inputs.push_str(&format!("[{}]", name));
+	}
+	
+	// Output buffer sink
+	graph.add(
+		&filter::find("abuffersink").ok_or_else(|| DesilenceError::FilterGraph {
+			message: "abuffersink filter not found".to_string(),
+		})?,
+		"out",
+		"",
+	)?;
+	
+	// If multiple streams, use amerge. If single, just pass through (anull).
+	let spec = if target_streams.len() > 1 {
+		format!("{}amerge=inputs={}[merged];[merged]anull[out]", amerge_inputs, target_streams.len())
+	} else {
+		// Single stream - just connect input to output
+		// amerge_inputs is like "[in_X]"
+		format!("{}anull[out]", amerge_inputs)
+	};
+
+	graph.parse(&spec).map_err(|e| DesilenceError::FilterGraph {
+		message: format!("Failed to parse filter spec '{}': {}", spec, e),
+	})?;
+	
+	graph.validate().map_err(|e| DesilenceError::FilterGraph {
+		message: format!("Filter graph validation failed: {}", e),
+	})?;
+
+	// Get the sink context once.
+	let mut sink = graph.get("out").ok_or_else(|| DesilenceError::FilterGraph {
+		message: "Sink 'out' not found after graph validation".to_string(),
+	})?;
+	
+	// Pair every decoder with its corresponding graph source context once.
+	let mut processors: HashMap<usize, (ffmpeg::decoder::Audio, ffmpeg::filter::Context)> = HashMap::with_capacity(decoders.len());
+	for (index, decoder) in decoders {
+		let name = format!("in_{}", index);
+		let source = graph.get(&name).ok_or_else(|| DesilenceError::FilterGraph {
+			message: format!("Source {} not found after graph validation", name),
+		})?;
+		processors.insert(index, (decoder, source));
+	}
+
+	// Process loop
 	let mut silence_segments: Vec<(f64, Option<f64>)> = Vec::new();
 	let mut current_silence_start: Option<f64> = None;
 	let mut total_silence_duration = 0.0;
@@ -231,66 +326,75 @@ pub fn detect_silence<P: AsRef<Path>>(
 
 	info!("Processing audio frames for silence detection...");
 
-	let in_time_base = stream.time_base();
-
 	for (stream_iter, packet) in ictx.packets() {
-		if stream_iter.index() != target_stream.index {
-			continue;
-		}
+		// Fast lookup: do we have a processor (decoder + source) for this stream index?
+		if let Some((decoder, source)) = processors.get_mut(&stream_iter.index()) {
+			decoder.send_packet(&packet)?;
+			
+			let mut decoded = frame::Audio::empty();
+			while decoder.receive_frame(&mut decoded).is_ok() {
+				source.source().add(&decoded).map_err(|e| DesilenceError::FilterGraph {
+					message: format!("Failed to add frame to source: {}", e),
+				})?;
 
-		decoder.send_packet(&packet)?;
+				let mut filtered = frame::Audio::empty();
+				let sink_time_base = sink.sink().time_base();
 
-		let mut decoded = frame::Audio::empty();
-		while decoder.receive_frame(&mut decoded).is_ok() {
-			frame_count += 1;
-
-			// Get timestamp
-			let pts = decoded.pts().unwrap_or(0);
-			let timestamp = pts as f64 * f64::from(in_time_base);
-
-			// Analyze audio level using pre-parsed threshold
-			let is_silent = is_frame_silent(&decoded, threshold_linear);
-
-			trace!(
-				frame = frame_count,
-				pts = pts,
-				timestamp = timestamp,
-				silent = is_silent,
-				"Processed audio frame"
-			);
-
-			// Track silence segments
-			match (current_silence_start, is_silent) {
-				(None, true) => {
-					// Starting silence
-					current_silence_start = Some(timestamp);
-					trace!(timestamp, "Silence started");
-				},
-				(Some(start), false) => {
-					// Ending silence
-					let silence_duration = timestamp - start;
-					if silence_duration >= duration {
-						silence_segments.push((start, Some(timestamp)));
-						total_silence_duration += silence_duration;
-						debug!(
-							start,
-							end = timestamp,
-							duration = silence_duration,
-							"Detected silence segment"
-						);
-					}
-					current_silence_start = None;
-				},
-				_ => {},
+				while sink.sink().frame(&mut filtered).is_ok() {
+					process_frame(
+						&filtered,
+						&mut frame_count,
+						threshold_linear,
+						duration,
+						sink_time_base,
+						&mut current_silence_start,
+						&mut silence_segments,
+						&mut total_silence_duration
+					);
+				}
 			}
 		}
 	}
 
-	// Flush decoder
-	decoder.send_eof()?;
-	let mut decoded = frame::Audio::empty();
-	while decoder.receive_frame(&mut decoded).is_ok() {
-		frame_count += 1;
+	// Flush decoders
+	for (_, (decoder, source)) in processors.iter_mut() {
+		decoder.send_eof()?;
+		let mut decoded = frame::Audio::empty();
+		while decoder.receive_frame(&mut decoded).is_ok() {
+			source.source().add(&decoded).ok(); // Best effort flush
+
+			let mut filtered = frame::Audio::empty();
+			while sink.sink().frame(&mut filtered).is_ok() {
+				process_frame(
+					&filtered,
+					&mut frame_count,
+					threshold_linear,
+					duration,
+					sink.sink().time_base(),
+					&mut current_silence_start,
+					&mut silence_segments,
+					&mut total_silence_duration
+				);
+			}
+		}
+		
+		// Flush filter sources
+		source.source().flush().ok();
+	}
+	
+	// Final flush of the graph sink
+	let mut filtered = frame::Audio::empty();
+	while sink.sink().frame(&mut filtered).is_ok() {
+		process_frame(
+			&filtered,
+			&mut frame_count,
+			threshold_linear,
+			duration,
+			sink.sink().time_base(),
+			&mut current_silence_start,
+			&mut silence_segments,
+			&mut total_silence_duration
+		);
 	}
 
 	// Handle case where file ends in silence
@@ -317,6 +421,41 @@ pub fn detect_silence<P: AsRef<Path>>(
 		total_silence_duration,
 		input_duration: stream_info.duration,
 	})
+}
+
+// Helper to avoid duplicate code
+#[allow(clippy::too_many_arguments)]
+fn process_frame(
+	frame: &frame::Audio,
+	count: &mut u64,
+	threshold: f64,
+	min_duration: f64,
+	time_base: ffmpeg::Rational,
+	current_start: &mut Option<f64>,
+	segments: &mut Vec<(f64, Option<f64>)>,
+	total_duration: &mut f64
+) {
+	*count += 1;
+	let pts = frame.pts().unwrap_or(0);
+	let timestamp = pts as f64 * f64::from(time_base);
+	let is_silent = is_frame_silent(frame, threshold);
+
+	match (*current_start, is_silent) {
+		(None, true) => {
+			*current_start = Some(timestamp);
+			trace!(timestamp, "Silence started");
+		},
+		(Some(start), false) => {
+			let silence_duration = timestamp - start;
+			if silence_duration >= min_duration {
+				segments.push((start, Some(timestamp)));
+				*total_duration += silence_duration;
+				debug!(start, end = timestamp, duration = silence_duration, "Detected silence segment");
+			}
+			*current_start = None;
+		},
+		_ => {},
+	}
 }
 
 /// Check if an audio frame is silent based on threshold.

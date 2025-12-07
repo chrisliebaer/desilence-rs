@@ -35,12 +35,12 @@ pub struct Args {
 	#[arg(short = 'a', long)]
 	pub audio_stream: Option<usize>,
 
-	/// Merge all audio streams for silence detection
+	/// Merge audio streams for silence detection
 	///
-	/// Expert option: combines all audio streams before detection.
-	/// Useful when silence might only be present in some channels.
-	#[arg(long, conflicts_with = "audio_stream")]
-	pub merge_audio: bool,
+	/// If no indices are provided, merges all available audio streams.
+	/// Can also specify specific stream indices (e.g., --merge-audio 0,2).
+	#[arg(long, value_delimiter = ',', num_args = 0.., conflicts_with = "audio_stream")]
+	pub merge_audio: Option<Vec<usize>>,
 
 	/// List available streams and exit
 	#[arg(short = 'l', long)]

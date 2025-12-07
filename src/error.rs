@@ -58,6 +58,11 @@ pub enum DesilenceError {
 	#[diagnostic(code(desilence::all_silent), help("Try lowering the --noise-threshold value"))]
 	NoAudibleSegments,
 
+	/// Filter graph error
+	#[error("Failed to create filter graph: {message}")]
+	#[diagnostic(code(desilence::filter))]
+	FilterGraph { message: String },
+
 	/// Output error
 	#[error("Failed to write output: {message}")]
 	#[diagnostic(code(desilence::output))]
