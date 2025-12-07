@@ -155,6 +155,17 @@ fn run(args: Args) -> std::result::Result<(), DesilenceError> {
 		tracing::debug!("{}", seg);
 	}
 
+	// Prevent writing binary data to terminal unless forced
+	if args.output.is_none() {
+		use std::io::IsTerminal;
+		if std::io::stdout().is_terminal() && !args.force {
+			// Print stream info to be helpful
+			use silence::print_stream_info;
+			print_stream_info(&stream_info);
+			return Err(DesilenceError::TerminalOutput);
+		}
+	}
+
 	// Run the streaming pipeline
 	let config = PipelineConfig {
 		detection_stream_index: detection_stream,

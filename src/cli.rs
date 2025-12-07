@@ -16,6 +16,10 @@ pub struct Args {
 	#[arg(short, long)]
 	pub input: PathBuf,
 
+	/// Output file path (defaults to stdout)
+	#[arg(short, long)]
+	pub output: Option<PathBuf>,
+
 	/// Silence detection threshold in dB (negative value)
 	///
 	/// Audio below this level is considered silence.
@@ -41,6 +45,10 @@ pub struct Args {
 	/// Can also specify specific stream indices (e.g., --merge-audio 0,2).
 	#[arg(long, value_delimiter = ',', num_args = 0.., conflicts_with = "audio_stream")]
 	pub merge_audio: Option<Vec<usize>>,
+
+	/// Force output to terminal even if it looks like a TTY
+	#[arg(short, long)]
+	pub force: bool,
 
 	/// List available streams and exit
 	#[arg(short = 'l', long)]
