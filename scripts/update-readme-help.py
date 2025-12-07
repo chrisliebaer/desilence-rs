@@ -153,6 +153,16 @@ def main():
 	# Determine binary path
 	if args.binary:
 		binary_path = args.binary
+		if not binary_path.exists():
+			print(f"Error: Binary not found at {binary_path}", file=sys.stderr)
+			print(f"Absolute path checked: {binary_path.absolute()}", file=sys.stderr)
+			# List current directory contents for debugging
+			cwd = Path.cwd()
+			print(f"\nCurrent directory: {cwd}", file=sys.stderr)
+			print("Contents:", file=sys.stderr)
+			for item in sorted(cwd.iterdir())[:20]:  # Limit to first 20 items
+				print(f"  - {item.name}", file=sys.stderr)
+			sys.exit(1)
 	else:
 		# Try common locations
 		candidates = [
