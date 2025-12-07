@@ -32,3 +32,6 @@ test_debug.bat
 # Build Configuration
 /.env
 /libs
+
+# Windows is complicated, usually DLLs best placed in root
+*.dll

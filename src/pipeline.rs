@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+
 use ffmpeg_next::{
 	self as ffmpeg,
 	codec,
@@ -58,6 +59,7 @@ pub struct PipelineConfig {
 /// within audible segments, writing to stdout in NUT format.
 pub fn run_pipeline<P: AsRef<std::path::Path>>(
 	input_path: P,
+	output_path: Option<&std::path::Path>,
 	segments: &SegmentList,
 	config: &PipelineConfig,
 ) -> Result<PipelineStats> {
@@ -65,6 +67,7 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 
 	info!(
 			path = %input_path.display(),
+			output = ?output_path,
 			audible_segments = segments.audible_count(),
 			"Starting streaming pipeline"
 	);
@@ -73,9 +76,12 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 
 	let mut ictx = format::input(input_path)?;
 
-	// Create output context for stdout with NUT format
-	// We need to use pipe: protocol
-	let mut octx = create_stdout_output()?;
+	// Create output context
+	let mut octx = if let Some(path) = output_path {
+		format::output(path)?
+	} else {
+		create_stdout_output()?
+	};
 
 	// Build stream mappings
 	let mut stream_mappings: Vec<StreamMapping> = Vec::new();
@@ -451,6 +457,8 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 				}
 			},
 		}
+
+
 	}
 
 	// Flush decoders
