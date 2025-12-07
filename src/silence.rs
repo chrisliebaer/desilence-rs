@@ -13,7 +13,6 @@ use tracing::{
 	debug,
 	info,
 	trace,
-	warn,
 };
 
 use crate::error::{
@@ -34,6 +33,8 @@ pub struct AudioStreamInfo {
 	pub channels: u16,
 	/// Stream duration in seconds (if known)
 	pub duration: Option<f64>,
+	/// Stream title/name (from metadata)
+	pub title: Option<String>,
 }
 
 /// Information about all streams in a file
@@ -48,17 +49,8 @@ pub struct StreamInfo {
 }
 
 /// Get information about streams in a file
-pub fn get_stream_info<P: AsRef<Path>>(path: P) -> Result<StreamInfo> {
-	let path = path.as_ref();
-
-	if !path.exists() {
-		return Err(DesilenceError::InputNotFound {
-			path: path.to_path_buf(),
-		});
-	}
-
-	let ictx = format::input(path)?;
-
+/// Get information about streams in a file
+pub fn get_stream_info(ictx: &format::context::Input) -> Result<StreamInfo> {
 	let mut audio_streams = Vec::new();
 	let mut video_stream_index = None;
 
@@ -77,6 +69,13 @@ pub fn get_stream_info<P: AsRef<Path>>(path: P) -> Result<StreamInfo> {
 					None
 				};
 
+				let metadata = stream.metadata();
+				let title = metadata
+					.get("title")
+					.or_else(|| metadata.get("name"))
+					.or_else(|| metadata.get("language"))
+					.map(|s| s.to_string());
+
 				audio_streams.push(AudioStreamInfo {
 					index: stream.index(),
 					codec_name: decoder
@@ -86,6 +85,7 @@ pub fn get_stream_info<P: AsRef<Path>>(path: P) -> Result<StreamInfo> {
 					sample_rate: decoder.rate(),
 					channels: decoder.channels(),
 					duration,
+					title,
 				});
 			},
 			media::Type::Video => {
@@ -127,14 +127,21 @@ pub fn print_stream_info(info: &StreamInfo) {
 
 	eprintln!("\nAudio streams ({}):", info.audio_streams.len());
 	for (i, audio) in info.audio_streams.iter().enumerate() {
+		let title_part = audio
+			.title
+			.as_ref()
+			.map(|t| format!(" Title: \"{}\"", t))
+			.unwrap_or_default();
+
 		eprintln!(
-			"  [{}] index={}, codec={}, {}Hz, {} channels{}",
+			"  [{}] index={}, codec={}, {}Hz, {} channels{},{}",
 			i,
 			audio.index,
 			audio.codec_name,
 			audio.sample_rate,
 			audio.channels,
-			audio.duration.map(|d| format!(", {:.2}s", d)).unwrap_or_default()
+			audio.duration.map(|d| format!(", {:.2}s", d)).unwrap_or_default(),
+			title_part
 		);
 	}
 }
@@ -178,7 +185,7 @@ pub fn detect_silence<P: AsRef<Path>>(
 	let mut ictx = format::input(path)?;
 
 	// Find the audio streams to use
-	let stream_info = get_stream_info(path)?;
+	let stream_info = get_stream_info(&ictx)?;
 
 	if stream_info.audio_streams.is_empty() {
 		return Err(DesilenceError::NoAudioStream);
@@ -221,7 +228,7 @@ pub fn detect_silence<P: AsRef<Path>>(
 		vec![&stream_info.audio_streams[0]]
 	};
 
-	let use_filter_graph = target_streams.len() > 1;
+
 
 	info!(
 		count = target_streams.len(),
@@ -243,14 +250,19 @@ pub fn detect_silence<P: AsRef<Path>>(
 		decoders.insert(target.index, decoder);
 	}
 
-	// ALWAYS use a filter graph to unify the code path.
-	// Even for a single stream, we pass it through the graph.
+	// use a filter graph to unify the code path.
 	let mut graph = filter::Graph::new();
-	let mut amerge_inputs = String::new();
 	
+	graph.add(
+		&filter::find("abuffersink").ok_or_else(|| DesilenceError::FilterGraph {
+			message: "abuffersink filter not found".to_string(),
+		})?,
+		"out",
+		"",
+	)?;
+
 	for target in &target_streams {
 		let decoder = decoders.get(&target.index).unwrap();
-		
 		let args = format!(
 			"time_base={}:sample_rate={}:sample_fmt={}:channel_layout=0x{:x}",
 			ictx.stream(target.index).unwrap().time_base(),
@@ -267,42 +279,48 @@ pub fn detect_silence<P: AsRef<Path>>(
 			&name,
 			&args,
 		)?;
-		
-		amerge_inputs.push_str(&format!("[{}]", name));
 	}
-	
-	// Output buffer sink
-	graph.add(
-		&filter::find("abuffersink").ok_or_else(|| DesilenceError::FilterGraph {
-			message: "abuffersink filter not found".to_string(),
-		})?,
-		"out",
-		"",
-	)?;
-	
-	// If multiple streams, use amerge. If single, just pass through (anull).
-	let spec = if target_streams.len() > 1 {
-		format!("{}amerge=inputs={}[merged];[merged]anull[out]", amerge_inputs, target_streams.len())
-	} else {
-		// Single stream - just connect input to output
-		// amerge_inputs is like "[in_X]"
-		format!("{}anull[out]", amerge_inputs)
-	};
 
-	graph.parse(&spec).map_err(|e| DesilenceError::FilterGraph {
-		message: format!("Failed to parse filter spec '{}': {}", spec, e),
-	})?;
-	
+	// For single streams, link directly to sink, for multiple streams, use amerge.
+	if target_streams.len() > 1 {
+		let amerge_name = "merge";
+		graph.add(
+			&filter::find("amerge").ok_or_else(|| DesilenceError::FilterGraph {
+				message: "amerge filter not found".to_string(),
+			})?,
+			amerge_name,
+			&format!("inputs={}", target_streams.len()),
+		)?;
+
+		let mut sink = graph.get("out").unwrap();
+		let mut amerge = graph.get(amerge_name).unwrap();
+
+		amerge.link(0, &mut sink, 0);
+
+		for (i, target) in target_streams.iter().enumerate() {
+			let name = format!("in_{}", target.index);
+			let mut source = graph.get(&name).unwrap();
+			source.link(0, &mut amerge, i as u32);
+		}
+	} else {
+		let target = target_streams[0];
+		let name = format!("in_{}", target.index);
+		
+		let mut sink = graph.get("out").unwrap();
+		let mut source = graph.get(&name).unwrap();
+		
+		source.link(0, &mut sink, 0);
+	}
+
 	graph.validate().map_err(|e| DesilenceError::FilterGraph {
 		message: format!("Filter graph validation failed: {}", e),
 	})?;
 
-	// Get the sink context once.
 	let mut sink = graph.get("out").ok_or_else(|| DesilenceError::FilterGraph {
 		message: "Sink 'out' not found after graph validation".to_string(),
 	})?;
 	
-	// Pair every decoder with its corresponding graph source context once.
+	// Pair every decoder with its corresponding graph source context.
 	let mut processors: HashMap<usize, (ffmpeg::decoder::Audio, ffmpeg::filter::Context)> = HashMap::with_capacity(decoders.len());
 	for (index, decoder) in decoders {
 		let name = format!("in_{}", index);

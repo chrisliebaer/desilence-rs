@@ -26,6 +26,7 @@ use tracing_subscriber::{
 	prelude::*,
 	EnvFilter,
 };
+use ffmpeg_next as ffmpeg;
 
 fn main() -> Result<()> {
 	// Handle --dump-help flag before parsing since regular invocation would require all flags to be valid
@@ -61,8 +62,11 @@ fn run(args: Args) -> std::result::Result<(), DesilenceError> {
 
 	info!(input = %args.input.display(), "Starting desilence-rs");
 
+	// Open input file
+	let ictx = ffmpeg::format::input(&args.input)?;
+
 	// Get stream information
-	let stream_info = silence::get_stream_info(&args.input)?;
+	let stream_info = silence::get_stream_info(&ictx)?;
 
 	// Handle --list-streams
 	if args.list_streams {

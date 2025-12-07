@@ -83,7 +83,7 @@ mod tests {
 		assert_eq!(args.noise_threshold, "-50dB");
 		assert_eq!(args.duration, 0.5);
 		assert!(args.audio_stream.is_none());
-		assert!(!args.merge_audio);
+		assert!(args.merge_audio.is_none());
 		assert!(!args.list_streams);
 		assert_eq!(args.verbose, 0);
 		assert!(!args.quiet);
