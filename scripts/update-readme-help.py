@@ -32,8 +32,10 @@ from pathlib import Path
 def get_help_text(binary_path: Path) -> str:
 	"""Extract help text from desilence-rs using --dump-help flag."""
 	try:
+		# Resolve to absolute path to ensure subprocess finds it (avoid PATH search for relative paths)
+		cmd_path = binary_path.resolve()
 		result = subprocess.run(
-			[str(binary_path), "--dump-help"],
+			[str(cmd_path), "--dump-help"],
 			capture_output=True,
 			text=True,
 			check=True,
@@ -155,13 +157,6 @@ def main():
 		binary_path = args.binary
 		if not binary_path.exists():
 			print(f"Error: Binary not found at {binary_path}", file=sys.stderr)
-			print(f"Absolute path checked: {binary_path.absolute()}", file=sys.stderr)
-			# List current directory contents for debugging
-			cwd = Path.cwd()
-			print(f"\nCurrent directory: {cwd}", file=sys.stderr)
-			print("Contents:", file=sys.stderr)
-			for item in sorted(cwd.iterdir())[:20]:  # Limit to first 20 items
-				print(f"  - {item.name}", file=sys.stderr)
 			sys.exit(1)
 	else:
 		# Try common locations
