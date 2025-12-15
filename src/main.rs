@@ -141,8 +141,12 @@ fn run(args: Args) -> std::result::Result<(), DesilenceError> {
 
 	// Check if any silence was detected
 	if detection_result.silence_segments.is_empty() {
-		warn!("No silence segments detected in input");
-		return Err(DesilenceError::NoSilenceDetected);
+		if args.ignore_no_silence {
+			info!("No silence segments detected in input (continuing due to --ignore-no-silence)");
+		} else {
+			warn!("No silence segments detected in input");
+			return Err(DesilenceError::NoSilenceDetected);
+		}
 	}
 
 	info!(

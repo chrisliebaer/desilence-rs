@@ -127,7 +127,6 @@ Run `desilence-rs` inside the container but pipe the output to a local `ffmpeg` 
 This is ideal if your local ffmpeg has codecs and settings you want to use.
 
 ```bash
-# Powershell example
 # Mount current directory ($PWD) to /data inside container
 docker run --rm -v ${PWD}:/data desilence-rs -i /data/input.mp4 | ffmpeg -f nut -i pipe: -map 0 -c copy output.mp4
 ```
@@ -169,6 +168,8 @@ Options:
           Verbose output (repeat for more verbosity: -v, -vv, -vvv)
   -q, --quiet
           Quiet mode - suppress all non-error output
+      --ignore-no-silence
+          Ignore error when no silence segments are detected
   -h, --help
           Print help (see more with '--help')
   -V, --version
