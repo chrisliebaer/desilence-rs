@@ -61,6 +61,10 @@ pub struct Args {
 	/// Quiet mode - suppress all non-error output
 	#[arg(short, long, conflicts_with = "verbose")]
 	pub quiet: bool,
+
+	/// Ignore error when no silence segments are detected
+	#[arg(long)]
+	pub ignore_no_silence: bool,
 }
 
 impl Args {
