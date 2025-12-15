@@ -1,4 +1,5 @@
 //! Error types for desilence-rs
+#![allow(unused_assignments)]
 
 use std::path::PathBuf;
 
@@ -9,6 +10,8 @@ pub type Result<T> = std::result::Result<T, DesilenceError>;
 
 /// Main error type for desilence-rs operations
 #[derive(Debug, Diagnostic, thiserror::Error)]
+// remove individual unused_assignments once clippy bug is fixed:
+// https://github.com/rust-lang/rust/issues/147648
 pub enum DesilenceError {
 	/// FFmpeg library error
 	#[error("FFmpeg error: {message}")]
@@ -25,7 +28,10 @@ pub enum DesilenceError {
 		code(desilence::input_not_found),
 		help("Ensure the file exists and you have read permissions")
 	)]
-	InputNotFound { path: PathBuf },
+	InputNotFound {
+		#[allow(unused_assignments)]
+		path: PathBuf,
+	},
 
 	/// No audio stream found in input
 	#[error("No audio stream found in input file")]
@@ -38,7 +44,12 @@ pub enum DesilenceError {
 	/// Invalid audio stream index
 	#[error("Audio stream index {index} not found (file has {count} audio streams)")]
 	#[diagnostic(code(desilence::invalid_stream), help("Use -l/--list-streams to see available streams"))]
-	InvalidAudioStreamIndex { index: usize, count: usize },
+	InvalidAudioStreamIndex {
+		#[allow(unused_assignments)]
+		index: usize,
+		#[allow(unused_assignments)]
+		count: usize,
+	},
 
 	/// No video stream found in input
 	#[error("No video stream found in input file")]
@@ -79,7 +90,10 @@ pub enum DesilenceError {
 		code(desilence::invalid_threshold),
 		help("Threshold should be a negative number in dB, e.g., '-50dB' or '-50'")
 	)]
-	InvalidThreshold { value: String },
+	InvalidThreshold {
+		#[allow(unused_assignments)]
+		value: String,
+	},
 
 	/// I/O error
 	#[error("I/O error: {0}")]

@@ -15,24 +15,23 @@ static = ["ffmpeg-next/static", "ffmpeg-next/build"]
 # FFmpeg bindings - using git version with build feature for Windows
 # The upstream already has Windows MSVC + MSYS2 build support
 ffmpeg-next = { git = "https://github.com/zmwangx/rust-ffmpeg.git", default-features = false, features = [
-	"codec",
-	"format", 
-	"filter",
-	"software-resampling",
-	"software-scaling",
-]}
+    "codec",
+    "format",
+    "filter",
+    "software-resampling",
+    "software-scaling",
+] }
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
 
 # Error handling with pretty diagnostics
 miette = { version = "7", features = ["fancy"] }
-thiserror = "1"
+thiserror = "2.0"
 
 # Structured logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-is-terminal = "0.4.17"
 
 [profile.release]
 lto = true
