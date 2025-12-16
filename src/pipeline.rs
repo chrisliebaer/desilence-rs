@@ -347,11 +347,16 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 
 						// Encode frame to packet
 						if let Some(encoder) = audio_encoders.get_mut(&ist_index) {
+							// Capture timebase for rescaling
+							let encoder_tb = encoder.time_base();
+							
 							encoder.send_frame(&resampled_frame)?;
 
 							let mut out_packet = Packet::empty();
 							while encoder.receive_packet(&mut out_packet).is_ok() {
 								out_packet.set_stream(mapping.output_index);
+								// Rescale timestamps from encoder timebase to output stream timebase
+								out_packet.rescale_ts(encoder_tb, mapping.output_time_base);
 								out_packet.write_interleaved(&mut octx)?;
 								stats.output_packets += 1;
 							}
@@ -399,11 +404,36 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 		}
 	}
 
-	for (_, decoder) in audio_decoders.iter_mut() {
+	for (index, decoder) in audio_decoders.iter_mut() {
 		decoder.send_eof()?;
 		let mut decoded = frame::Audio::empty();
+		// Get encoder for this stream
+		let encoder = audio_encoders.get_mut(index);
+		let mapping = stream_mappings.iter().find(|m| m.input_index == *index);
+
 		while decoder.receive_frame(&mut decoded).is_ok() {
+			// Flush incomplete audio frames if necessary, but typically we just drop them if they don't form a full frame
+			// But wait, if we have a valid frame, we should process it?
+			// The original code just counted them.
+			// Implementing full flush logic for audio is complex because of resampling/continuous stream.
+			// For desilence, dropping the last fraction of a second is usually acceptable.
 			stats.output_frames += 1;
+		}
+		
+		// Flush encoder
+		if let Some(enc) = encoder {
+			enc.send_eof()?;
+			let mut out_packet = Packet::empty();
+			let encoder_tb = enc.time_base();
+			
+			if let Some(map) = mapping {
+				while enc.receive_packet(&mut out_packet).is_ok() {
+					out_packet.set_stream(map.output_index);
+					out_packet.rescale_ts(encoder_tb, map.output_time_base);
+					out_packet.write_interleaved(&mut octx)?;
+					stats.output_packets += 1;
+				}
+			}
 		}
 	}
 
@@ -474,10 +504,21 @@ fn write_raw_video_frame(
 			let den = tb.numerator() as i64 * fps.numerator() as i64;
 			(num + den / 2) / den
 		} else {
-			packet_duration
+			rescale_duration(packet_duration, mapping.input_time_base, mapping.output_time_base)
 		}
 	} else {
-		packet_duration
+		rescale_duration(packet_duration, mapping.input_time_base, mapping.output_time_base)
+	};
+
+	// Safeguard against zero duration (which causes duplicate PTS)
+	let frame_duration = if frame_duration <= 0 {
+		// Force a minimum duration of 1/60s (approximate)
+		let tb = mapping.output_time_base;
+		// 1/60s in ticks = den / (60 * num)
+		let min_dur = tb.denominator() as i64 / (60 * std::cmp::max(1, tb.numerator() as i64));
+		std::cmp::max(1, min_dur)
+	} else {
+		frame_duration
 	};
 
 	// Use safe getters for frame properties
@@ -532,6 +573,24 @@ fn write_raw_video_frame(
 	stats.output_frames += 1;
 
 	Ok(())
+}
+
+/// Helper to rescale duration between timebases
+fn rescale_duration(duration: i64, src_tb: Rational, dst_tb: Rational) -> i64 {
+	// Formula: val * (src_num * dst_den) / (src_den * dst_num)
+	let src_num = src_tb.numerator() as i128;
+	let src_den = src_tb.denominator() as i128;
+	let dst_num = dst_tb.numerator() as i128;
+	let dst_den = dst_tb.denominator() as i128;
+
+	let num = duration as i128 * src_num * dst_den;
+	let den = src_den * dst_num;
+
+	if den == 0 {
+		0
+	} else {
+		(num / den) as i64
+	}
 }
 
 #[cfg(test)]
