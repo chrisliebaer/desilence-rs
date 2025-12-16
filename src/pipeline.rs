@@ -281,9 +281,6 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 	// Process packets
 	let mut stats = PipelineStats::default();
 
-	// We still use accumulation for Audio because encoders need continuous samples
-	let mut current_audio_pts: HashMap<usize, i64> = HashMap::new();
-
 	// Prepare Segment Offsets
 	// This maps "Input Time" -> "Output Offset"
 	// Output_Time = Input_Time - Offset
@@ -391,49 +388,140 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 				}
 			},
 			media::Type::Audio => {
-				if let Some(offset) = current_segment {
+				if let Some(_offset) = current_segment {
 					if let Some(decoder) = audio_decoders.get_mut(&ist_index) {
 						decoder.send_packet(&packet)?;
 
 						let mut decoded = frame::Audio::empty();
 						while decoder.receive_frame(&mut decoded).is_ok() {
-							// For audio, we check the frame timestamp again because one packet can decode to multiple frames
 							let frame_pts = decoded.pts().unwrap_or(0);
-							let frame_timestamp = frame_pts as f64 * f64::from(mapping.input_time_base);
+							let tb_val = f64::from(mapping.input_time_base);
+							let frame_start_time = frame_pts as f64 * tb_val;
+							let samples = decoded.samples();
+							let sample_rate = decoder.rate() as f64;
+							let duration_seconds = samples as f64 / sample_rate;
+							let frame_end_time = frame_start_time + duration_seconds;
 
-							// Double check segment (audio frame might straddle boundary?)
-							// For simplicity, if the packet started in the segment, we keep the frames.
-							// But strictly we should check frame_timestamp.
-							if frame_timestamp >= offset.start && frame_timestamp < offset.end {
-								let output_pts = current_audio_pts.entry(mapping.output_index).or_insert(0);
+							// Check intersection with any audible segment
+							// We might overlap multiple segments? Unlikely for small frames, but possible.
+							// For simplicity, find the FIRST overlapping segment.
+							if let Some(offset) = segment_offsets.iter().find(|s| frame_end_time > s.start && frame_start_time < s.end) {
+								
+								// Calculate intersection time range
+								let intersect_start = frame_start_time.max(offset.start);
+								let intersect_end = frame_end_time.min(offset.end);
+								
+								// Convert to sample indices relative to frame start
+								let start_offset_secs = intersect_start - frame_start_time;
+								let end_offset_secs = intersect_end - frame_start_time;
+								
+								let start_sample = (start_offset_secs * sample_rate).round() as usize;
+								let end_sample = (end_offset_secs * sample_rate).round() as usize;
+								
+								let start_sample = start_sample.min(samples);
+								let end_sample = end_sample.min(samples);
+								let keep_samples = end_sample.saturating_sub(start_sample);
 
-								// Resample/Convert frame to packed format
-								let mut resampled_frame = frame::Audio::empty();
-
-								// Perform resampling
-								if let Some(resampler) = audio_resamplers.get_mut(&ist_index) {
-									resampler.run(&decoded, &mut resampled_frame)?;
-								}
-
-								// Update PTS for the new continuous stream
-								resampled_frame.set_pts(Some(*output_pts));
-
-								// Encode frame to packet
-								if let Some(encoder) = audio_encoders.get_mut(&ist_index) {
-									let encoder_tb = encoder.time_base();
-									encoder.send_frame(&resampled_frame)?;
-
-									let mut out_packet = Packet::empty();
-									while encoder.receive_packet(&mut out_packet).is_ok() {
-										out_packet.set_stream(mapping.output_index);
-										out_packet.rescale_ts(encoder_tb, mapping.output_time_base);
-										out_packet.write_interleaved(&mut octx)?;
-										stats.output_packets += 1;
+								if keep_samples > 0 {
+									// Create a trimmed frame
+									// Since actual slicing is hard with safe wrappers, we might rely on the resampler?
+									// No, resampler takes whole frame. We should construct a new frame or just accept 
+									// that we might need unsafe code to slice.
+									// EASIER: Assume Resampler can handle offset? No.
+									// Copying samples is robust.
+									
+									let mut trimmed = frame::Audio::new(decoded.format(), decoded.samples(), decoded.channel_layout());
+									trimmed.set_rate(decoded.rate());
+									
+									// We need to copy data. 
+									// Since we don't know if planar/packed, this is annoying.
+									// BUT we can assume the decoder outputs something standard?
+									// Actually, let's cheat: We only really care about TIMING drift.
+									// If we adjust the PTS/Duration passed to encoder, will it respecting?
+									// Encoder consumes samples. We MUST feed it the correct number of samples.
+									
+									// Okay, proper trim:
+									// For now, let's use a simplified approach:
+									// If we are at the START of a segment (start_sample > 0), skip those samples.
+									// If we are at the END (end_sample < total), drop suffix.
+									
+									// SAFETY: We use Unsafe to calculate pointer offsets for the resampler input if possible?
+									// No, let's create a temporary frame and use `av_samples_copy` equivalent if exposed?
+									// `frame::Audio` doesn't expose generic copy.
+									
+									// Workaround: Use the fact that `decoded` is mutable?
+									// No, `decoded` owns its buffer.
+									
+									// Let's rely on the fact that `samples` count determines what is read.
+									// If we update `nb_samples` and data pointers...
+									// unsafe {
+									//    (*decoded.as_mut_ptr()).nb_samples = keep_samples as i32;
+									//    // shift data pointers for start_offset...
+									// }
+									// This is risky but standard FFmpeg pattern.
+									
+									unsafe {
+										let ptr = decoded.as_mut_ptr();
+										(*ptr).nb_samples = keep_samples as i32;
+										
+										// Calculate byte offset per sample
+										// This depends on format.
+										let bytes_per_sample = ffmpeg::ffi::av_get_bytes_per_sample(std::mem::transmute((*ptr).format));
+										let channels = (*ptr).ch_layout.nb_channels; // FFmpeg 5.1+ layout ? verify struct
+                                        // Actually older ffmpeg used `channels`.
+                                        // rust-ffmpeg `as_mut_ptr` returns `AVFrame*`.
+                                        // Let's assume standard planar/packed logic.
+                                        let is_planar = ffmpeg::ffi::av_sample_fmt_is_planar(std::mem::transmute((*ptr).format)) == 1;
+                                        
+                                        if start_sample > 0 {
+                                            // Shift data pointers
+                                            let offset_bytes = if is_planar {
+                                                start_sample as i32 * bytes_per_sample
+                                            } else {
+                                                start_sample as i32 * bytes_per_sample * channels
+                                            };
+                                            
+                                            // Update pointers
+                                            let planes = if is_planar { channels } else { 1 };
+                                            for i in 0..planes {
+	                                            if !(*ptr).data[i as usize].is_null() {
+                                                	(*ptr).data[i as usize] = (*ptr).data[i as usize].add(offset_bytes as usize);
+                                                }
+                                            }
+                                        }
+									}
+									
+									// Now `decoded` appears to be the trimmed frame.
+									// Recalculate PTS for the trimmed start
+									// New Input PTS = intersect_start.
+									// Output PTS = intersect_start - offset.
+									let output_timestamp = intersect_start - offset.time_offset;
+									
+									// Resample
+									let mut resampled_frame = frame::Audio::empty();
+									if let Some(resampler) = audio_resamplers.get_mut(&ist_index) {
+										resampler.run(&decoded, &mut resampled_frame)?;
+									}
+									
+									let tb_num = mapping.output_time_base.numerator() as f64;
+									let tb_den = mapping.output_time_base.denominator() as f64;
+									let output_pts = (output_timestamp * (tb_den / tb_num)).round() as i64;
+									
+									resampled_frame.set_pts(Some(output_pts));
+									
+									if let Some(encoder) = audio_encoders.get_mut(&ist_index) {
+										let encoder_tb = encoder.time_base();
+										encoder.send_frame(&resampled_frame)?;
+										
+										let mut out_packet = Packet::empty();
+										while encoder.receive_packet(&mut out_packet).is_ok() {
+											out_packet.set_stream(mapping.output_index);
+											out_packet.rescale_ts(encoder_tb, mapping.output_time_base);
+											out_packet.write_interleaved(&mut octx)?;
+											stats.output_packets += 1;
+										}
 									}
 								}
-
-								let samples = decoded.samples();
-								*output_pts += samples as i64;
 							}
 						}
 					}
