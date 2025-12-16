@@ -3,11 +3,24 @@
 #   .\build.ps1          (CI/Clean mode: Downloads gyan.dev ffmpeg)
 #   .\build.ps1 -Local   (Local mode: Uses existing VCPKG/system ffmpeg)
 #   .\build.ps1 -RunTests (Run tests after build)
+#   .\build.ps1 -RunClippy (Run clippy)
+#   .\build.ps1 -RunFormat (Run rustfmt)
+#   .\build.ps1 -All       (Run all)
 
 param (
 	[switch]$Local,
-	[switch]$RunTests
+	[switch]$RunTests,
+	[switch]$RunClippy,
+	[switch]$RunFormat,
+	[switch]$All
 )
+
+if ($All) {
+	Write-Host "Running all tests, clippy, and format..." -ForegroundColor Cyan
+	$RunTests = $true
+	$RunClippy = $true
+	$RunFormat = $true
+}
 
 $ErrorActionPreference = "Stop"
 
@@ -79,6 +92,25 @@ if (-not $Local) {
 	Write-Host "Local Mode: Using system/VCPKG FFmpeg configuration..." -ForegroundColor Cyan
 	if ($env:VCPKG_ROOT) {
 		Write-Host "VCPKG_ROOT is set: $env:VCPKG_ROOT"
+	}
+}
+
+
+if ($RunFormat) {
+	Write-Host "Running Rustfmt..." -ForegroundColor Cyan
+	cargo +nightly fmt
+	if ($LASTEXITCODE -ne 0) {
+		Write-Error "Rustfmt failed with exit code $LASTEXITCODE"
+		exit $LASTEXITCODE
+	}
+}
+
+if ($RunClippy) {
+	Write-Host "Running Clippy..." -ForegroundColor Cyan
+	cargo clippy --workspace --all-targets -- -D warnings
+	if ($LASTEXITCODE -ne 0) {
+		Write-Error "Clippy failed with exit code $LASTEXITCODE"
+		exit $LASTEXITCODE
 	}
 }
 

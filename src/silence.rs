@@ -306,7 +306,7 @@ pub fn detect_silence<P: AsRef<Path>>(
 	})?;
 
 	// Pair every decoder with its corresponding graph source context.
-	let mut processors: HashMap<usize, (ffmpeg::decoder::Audio, ffmpeg::filter::Context)> = HashMap::with_capacity(decoders.len());
+	let mut processors: HashMap<usize, (ffmpeg::decoder::Audio, filter::Context)> = HashMap::with_capacity(decoders.len());
 	for (index, decoder) in decoders {
 		let name = format!("in_{}", index);
 		let source = graph.get(&name).ok_or_else(|| DesilenceError::FilterGraph {
@@ -324,7 +324,7 @@ pub fn detect_silence<P: AsRef<Path>>(
 	info!("Processing audio frames for silence detection via silencedetect filter...");
 
 	// We'll use a closure to process filter output frames
-	let mut process_filter_output = |sink: &mut ffmpeg::filter::Context| -> Result<()> {
+	let mut process_filter_output = |sink: &mut filter::Context| -> Result<()> {
 		let mut filtered = frame::Audio::empty();
 		while sink.sink().frame(&mut filtered).is_ok() {
 			frame_count += 1;

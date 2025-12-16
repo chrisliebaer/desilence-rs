@@ -199,13 +199,7 @@ fn run(args: Args) -> std::result::Result<(), DesilenceError> {
 		output_all_streams: true, // Output all audio streams (NUT supports it)
 	};
 
-	let stats = pipeline::run_pipeline(&args.input, args.output.as_deref(), &segments, &config)?;
-
-	info!(
-		output_frames = stats.output_frames,
-		kept_percentage = format!("{:.1}%", stats.kept_percentage()),
-		"Processing complete"
-	);
+	pipeline::run_pipeline(&args.input, args.output.as_deref(), &segments, &config)?;
 
 	// Print summary to stderr
 	if !args.quiet {
@@ -215,8 +209,6 @@ fn run(args: Args) -> std::result::Result<(), DesilenceError> {
 		eprintln!("  Silence removed:   {:.2}s", detection_result.total_silence_duration);
 		eprintln!("  Audible segments:  {}", segments.audible_count());
 		eprintln!("  Audible duration:  {:.2}s", segments.total_audible_duration);
-		eprintln!("  Output frames:     {}", stats.output_frames);
-		eprintln!("  Content kept:      {:.1}%", stats.kept_percentage());
 	}
 
 	Ok(())

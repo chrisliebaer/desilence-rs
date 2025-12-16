@@ -71,7 +71,7 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 	output_path: Option<&std::path::Path>,
 	segments: &SegmentList,
 	config: &PipelineConfig,
-) -> Result<PipelineStats> {
+) -> Result<()> {
 	let input_path = input_path.as_ref();
 
 	info!(
@@ -96,7 +96,7 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 	let mut stream_mappings: Vec<StreamMapping> = Vec::new();
 	let mut video_decoder: Option<(usize, codec::decoder::Video)> = None;
 	let mut audio_decoders: HashMap<usize, codec::decoder::Audio> = HashMap::new();
-	let mut audio_encoders: HashMap<usize, codec::encoder::Audio> = HashMap::new();
+	let mut audio_encoders: HashMap<usize, encoder::Audio> = HashMap::new();
 	let mut audio_resamplers: HashMap<usize, software::resampling::Context> = HashMap::new();
 
 	let mut ost_index = 0usize;
@@ -278,31 +278,13 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 		mapping.output_time_base = octx.stream(mapping.output_index).unwrap().time_base();
 	}
 
-	// Process packets
-	let mut stats = PipelineStats::default();
-
 	// Prepare Segment Offsets
 	// This maps "Input Time" -> "Output Offset"
 	// Output_Time = Input_Time - Offset
 	let mut segment_offsets: Vec<SegmentOffset> = Vec::new();
-	let mut total_silence_removed = 0.0;
-	
-	for seg in segments.audible_segments() {
-		segment_offsets.push(SegmentOffset {
-			start: seg.start,
-			end: seg.end.unwrap_or(f64::INFINITY),
-			time_offset: total_silence_removed,
-		});
-
-		// Calculate gap between this start and previous end?
-		// No, easier: find the gap between this segment's start and the Next segment's start?
-		// We need to know how much silence was *before* this segment.
-		// `total_silence_removed` accumulates durations of SILENT segments.
-	}
 
 	// Re-calculate offsets correctly by iterating ALL segments to accumulate silence
-	segment_offsets.clear();
-	total_silence_removed = 0.0;
+	let mut total_silence_removed = 0.0;
 	for seg in segments.all_segments() {
 		if seg.is_audible() {
 			segment_offsets.push(SegmentOffset {
@@ -310,12 +292,8 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 				end: seg.end.unwrap_or(f64::INFINITY),
 				time_offset: total_silence_removed,
 			});
-		} else {
-			if let Some(dur) = seg.duration() {
-				total_silence_removed += dur;
-			} else {
-				// Infinite silence at end, doesn't matter for offsets
-			}
+		} else if let Some(dur) = seg.duration() {
+			total_silence_removed += dur;
 		}
 	}
 
@@ -342,8 +320,10 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 
 		// Find which segment this matches
 		// We use a simple linear search since N is small
-		let current_segment = segment_offsets.iter().find(|s| packet_timestamp >= s.start && packet_timestamp < s.end);
-		
+		let current_segment = segment_offsets
+			.iter()
+			.find(|s| packet_timestamp >= s.start && packet_timestamp < s.end);
+
 		match mapping.media_type {
 			media::Type::Video => {
 				// Decode ALL video packets to maintain decoder state (reference frames)
@@ -355,16 +335,19 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 					let frame_timestamp = frame_pts as f64 * f64::from(mapping.input_time_base);
 
 					// Check if frame is in an audible segment
-					if let Some(seg_offset) = segment_offsets.iter().find(|s| frame_timestamp >= s.start && frame_timestamp < s.end) {
+					if let Some(seg_offset) = segment_offsets
+						.iter()
+						.find(|s| frame_timestamp >= s.start && frame_timestamp < s.end)
+					{
 						let output_timestamp = frame_timestamp - seg_offset.time_offset;
-						
+
 						// Convert to Output PTS
 						let tb_num = mapping.output_time_base.numerator() as f64;
 						let tb_den = mapping.output_time_base.denominator() as f64;
 						let output_pts = (output_timestamp * (tb_den / tb_num)).round() as i64;
-						
+
 						let fps = video_dec.frame_rate();
-						
+
 						// Calculate correct duration based on frame rate if available
 						// We need duration for the container
 						let duration_ts = if let Some(fps) = fps {
@@ -377,11 +360,13 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 								// Fallback: Rescale input packet duration
 								// Note: decoding might not give frame duration, so we use packet logic approximation
 								// or just 0 if unknown. better to trust standard fps logic.
-								0 
+								0
 							}
-						} else { 0 };
+						} else {
+							0
+						};
 
-						write_raw_video_frame(&mut octx, &decoded, mapping, output_pts, duration_ts, &mut stats)?;
+						write_raw_video_frame(&mut octx, &decoded, mapping, output_pts, duration_ts)?;
 					} else {
 						// Silent frame, drop
 					}
@@ -397,129 +382,57 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 							let frame_pts = decoded.pts().unwrap_or(0);
 							let tb_val = f64::from(mapping.input_time_base);
 							let frame_start_time = frame_pts as f64 * tb_val;
+
 							let samples = decoded.samples();
 							let sample_rate = decoder.rate() as f64;
 							let duration_seconds = samples as f64 / sample_rate;
 							let frame_end_time = frame_start_time + duration_seconds;
 
 							// Check intersection with any audible segment
-							// We might overlap multiple segments? Unlikely for small frames, but possible.
-							// For simplicity, find the FIRST overlapping segment.
-							if let Some(offset) = segment_offsets.iter().find(|s| frame_end_time > s.start && frame_start_time < s.end) {
-								
+							// We calculate precise sample intersection to prevent drift
+							if let Some(offset) = segment_offsets
+								.iter()
+								.find(|s| frame_end_time > s.start && frame_start_time < s.end)
+							{
 								// Calculate intersection time range
 								let intersect_start = frame_start_time.max(offset.start);
 								let intersect_end = frame_end_time.min(offset.end);
-								
+
 								// Convert to sample indices relative to frame start
 								let start_offset_secs = intersect_start - frame_start_time;
 								let end_offset_secs = intersect_end - frame_start_time;
-								
+
 								let start_sample = (start_offset_secs * sample_rate).round() as usize;
 								let end_sample = (end_offset_secs * sample_rate).round() as usize;
-								
+
 								let start_sample = start_sample.min(samples);
 								let end_sample = end_sample.min(samples);
 								let keep_samples = end_sample.saturating_sub(start_sample);
 
 								if keep_samples > 0 {
-									// Create a trimmed frame
-									// Since actual slicing is hard with safe wrappers, we might rely on the resampler?
-									// No, resampler takes whole frame. We should construct a new frame or just accept 
-									// that we might need unsafe code to slice.
-									// EASIER: Assume Resampler can handle offset? No.
-									// Copying samples is robust.
-									
-									let mut trimmed = frame::Audio::new(decoded.format(), decoded.samples(), decoded.channel_layout());
-									trimmed.set_rate(decoded.rate());
-									
-									// We need to copy data. 
-									// Since we don't know if planar/packed, this is annoying.
-									// BUT we can assume the decoder outputs something standard?
-									// Actually, let's cheat: We only really care about TIMING drift.
-									// If we adjust the PTS/Duration passed to encoder, will it respecting?
-									// Encoder consumes samples. We MUST feed it the correct number of samples.
-									
-									// Okay, proper trim:
-									// For now, let's use a simplified approach:
-									// If we are at the START of a segment (start_sample > 0), skip those samples.
-									// If we are at the END (end_sample < total), drop suffix.
-									
-									// SAFETY: We use Unsafe to calculate pointer offsets for the resampler input if possible?
-									// No, let's create a temporary frame and use `av_samples_copy` equivalent if exposed?
-									// `frame::Audio` doesn't expose generic copy.
-									
-									// Workaround: Use the fact that `decoded` is mutable?
-									// No, `decoded` owns its buffer.
-									
-									// Let's rely on the fact that `samples` count determines what is read.
-									// If we update `nb_samples` and data pointers...
-									// unsafe {
-									//    (*decoded.as_mut_ptr()).nb_samples = keep_samples as i32;
-									//    // shift data pointers for start_offset...
-									// }
-									// This is risky but standard FFmpeg pattern.
-									
-									unsafe {
-										let ptr = decoded.as_mut_ptr();
-										(*ptr).nb_samples = keep_samples as i32;
-										
-										// Calculate byte offset per sample
-										// This depends on format.
-										let bytes_per_sample = ffmpeg::ffi::av_get_bytes_per_sample(std::mem::transmute((*ptr).format));
-										let channels = (*ptr).ch_layout.nb_channels; // FFmpeg 5.1+ layout ? verify struct
-                                        // Actually older ffmpeg used `channels`.
-                                        // rust-ffmpeg `as_mut_ptr` returns `AVFrame*`.
-                                        // Let's assume standard planar/packed logic.
-                                        let is_planar = ffmpeg::ffi::av_sample_fmt_is_planar(std::mem::transmute((*ptr).format)) == 1;
-                                        
-                                        if start_sample > 0 {
-                                            // Shift data pointers
-                                            let offset_bytes = if is_planar {
-                                                start_sample as i32 * bytes_per_sample
-                                            } else {
-                                                start_sample as i32 * bytes_per_sample * channels
-                                            };
-                                            
-                                            // Update pointers
-                                            let planes = if is_planar { channels } else { 1 };
-                                            for i in 0..planes {
-	                                            if !(*ptr).data[i as usize].is_null() {
-                                                	(*ptr).data[i as usize] = (*ptr).data[i as usize].add(offset_bytes as usize);
-                                                }
-                                            }
-                                        }
-									}
-									
-									// Now `decoded` appears to be the trimmed frame.
+									// Trim the frame in-place to alignment with cuts
+									crate::audio_trim::trim_audio_frame(&mut decoded, start_sample, keep_samples);
+
 									// Recalculate PTS for the trimmed start
-									// New Input PTS = intersect_start.
-									// Output PTS = intersect_start - offset.
 									let output_timestamp = intersect_start - offset.time_offset;
-									
+
 									// Resample
 									let mut resampled_frame = frame::Audio::empty();
 									if let Some(resampler) = audio_resamplers.get_mut(&ist_index) {
 										resampler.run(&decoded, &mut resampled_frame)?;
 									}
-									
+
 									let tb_num = mapping.output_time_base.numerator() as f64;
 									let tb_den = mapping.output_time_base.denominator() as f64;
 									let output_pts = (output_timestamp * (tb_den / tb_num)).round() as i64;
-									
+
 									resampled_frame.set_pts(Some(output_pts));
-									
+
 									if let Some(encoder) = audio_encoders.get_mut(&ist_index) {
-										let encoder_tb = encoder.time_base();
 										encoder.send_frame(&resampled_frame)?;
-										
+
 										let mut out_packet = Packet::empty();
-										while encoder.receive_packet(&mut out_packet).is_ok() {
-											out_packet.set_stream(mapping.output_index);
-											out_packet.rescale_ts(encoder_tb, mapping.output_time_base);
-											out_packet.write_interleaved(&mut octx)?;
-											stats.output_packets += 1;
-										}
+										flush_audio_encoder(encoder, &mut out_packet, &mut octx, mapping)?;
 									}
 								}
 							}
@@ -531,27 +444,23 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 				if let Some(offset) = current_segment {
 					// Copy subtitle packets with shifted timing
 					let mut out_packet = packet.clone();
-					
 					let output_timestamp = packet_timestamp - offset.time_offset;
-					
 					out_packet.set_stream(mapping.output_index);
-					
+
 					// Manually set PTS based on shift
 					let tb_num = mapping.output_time_base.numerator() as f64;
 					let tb_den = mapping.output_time_base.denominator() as f64;
 					let new_pts = (output_timestamp * (tb_den / tb_num)).round() as i64;
-					
+
 					out_packet.set_pts(Some(new_pts));
 					out_packet.set_dts(Some(new_pts)); // Subtitles usually PTS=DTS
-					
+
 					// Rescale duration? Duration should be relatively same in seconds
 					// New_Dur_Ticks = Duration_Secs * Output_TB_Rate
 					// Duration_Secs = Old_Dur_Ticks * Input_TB_Rate
 					out_packet.rescale_ts(mapping.input_time_base, mapping.output_time_base);
 
 					out_packet.write_interleaved(&mut octx)?;
-
-					stats.output_packets += 1;
 				}
 			},
 			_ => {
@@ -570,24 +479,28 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 			let frame_timestamp = frame_pts as f64 * f64::from(mapping.input_time_base);
 
 			// Check if frame is in an audible segment
-			if let Some(seg_offset) = segment_offsets.iter().find(|s| frame_timestamp >= s.start && frame_timestamp < s.end) {
+			if let Some(seg_offset) = segment_offsets
+				.iter()
+				.find(|s| frame_timestamp >= s.start && frame_timestamp < s.end)
+			{
 				let output_timestamp = frame_timestamp - seg_offset.time_offset;
 				let tb_num = mapping.output_time_base.numerator() as f64;
 				let tb_den = mapping.output_time_base.denominator() as f64;
 				let output_pts = (output_timestamp * (tb_den / tb_num)).round() as i64;
-				
+
 				// Approximation for flush frames
 				let fps = video_dec.frame_rate();
-				let duration_ts = if let Some(fps) = fps { 
-					if fps.numerator() > 0 { 
-						((tb_den / tb_num) / (fps.numerator() as f64 / fps.denominator() as f64)).round() as i64 
-					} else { 0 } 
-				} else { 0 };
+				let duration_ts = if let Some(fps) = fps {
+					if fps.numerator() > 0 {
+						((tb_den / tb_num) / (fps.numerator() as f64 / fps.denominator() as f64)).round() as i64
+					} else {
+						0
+					}
+				} else {
+					0
+				};
 
-				write_raw_video_frame(
-					&mut octx, &decoded, mapping, output_pts, duration_ts,
-					&mut stats,
-				)?;
+				write_raw_video_frame(&mut octx, &decoded, mapping, output_pts, duration_ts)?;
 			}
 		}
 	}
@@ -599,21 +512,14 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 		let mapping = stream_mappings.iter().find(|m| m.input_index == *index);
 
 		while decoder.receive_frame(&mut decoded).is_ok() {
-			stats.output_frames += 1;
+			// Flush
 		}
-		
+
 		if let Some(enc) = encoder {
 			enc.send_eof()?;
 			let mut out_packet = Packet::empty();
-			let encoder_tb = enc.time_base();
-			
 			if let Some(map) = mapping {
-				while enc.receive_packet(&mut out_packet).is_ok() {
-					out_packet.set_stream(map.output_index);
-					out_packet.rescale_ts(encoder_tb, map.output_time_base);
-					out_packet.write_interleaved(&mut octx)?;
-					stats.output_packets += 1;
-				}
+				flush_audio_encoder(enc, &mut out_packet, &mut octx, map)?;
 			}
 		}
 	}
@@ -621,42 +527,14 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 	// Write trailer
 	octx.write_trailer()?;
 
-	info!(
-		output_frames = stats.output_frames,
-		output_packets = stats.output_packets,
-		dropped_packets = stats.dropped_packets,
-		"Pipeline complete"
-	);
+	info!("Pipeline complete");
 
-	Ok(stats)
+	Ok(())
 }
 
 /// Create an output context writing to stdout in NUT format
 fn create_stdout_output() -> Result<format::context::Output> {
 	Ok(format::output_as(&"pipe:1", "nut")?)
-}
-
-/// Statistics from pipeline execution
-#[derive(Debug, Default)]
-pub struct PipelineStats {
-	/// Number of frames written to output
-	pub output_frames: u64,
-	/// Number of packets written to output
-	pub output_packets: u64,
-	/// Number of packets dropped (in silent segments)
-	pub dropped_packets: u64,
-}
-
-impl PipelineStats {
-	/// Calculate percentage of content kept
-	pub fn kept_percentage(&self) -> f64 {
-		let total = self.output_packets + self.dropped_packets;
-		if total == 0 {
-			100.0
-		} else {
-			(self.output_packets as f64 / total as f64) * 100.0
-		}
-	}
 }
 
 /// Helper to write a raw video frame to the output context.
@@ -667,7 +545,6 @@ fn write_raw_video_frame(
 	mapping: &StreamMapping,
 	pts: i64,
 	duration: i64,
-	stats: &mut PipelineStats,
 ) -> Result<()> {
 	// Adjust PTS for continuous output
 	let mut out_video_frame = decoded.clone();
@@ -723,57 +600,21 @@ fn write_raw_video_frame(
 
 	out_packet.write_interleaved(octx)?;
 
-	stats.output_frames += 1;
-
 	Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn test_pipeline_stats_percentage() {
-		let stats = PipelineStats {
-			output_frames: 0,
-			output_packets: 50,
-			dropped_packets: 50,
-		};
-		assert!((stats.kept_percentage() - 50.0).abs() < 0.001);
-
-		let stats_empty = PipelineStats::default();
-		assert!((stats_empty.kept_percentage() - 100.0).abs() < 0.001);
-
-		let stats_full = PipelineStats {
-			output_frames: 10,
-			output_packets: 100,
-			dropped_packets: 0,
-		};
-		assert!((stats_full.kept_percentage() - 100.0).abs() < 0.001);
+/// Helper to flush an audio encoder and write any remaining packets to the output context.
+fn flush_audio_encoder(
+	encoder: &mut encoder::Audio,
+	out_packet: &mut Packet,
+	octx: &mut format::context::Output,
+	mapping: &StreamMapping,
+) -> Result<()> {
+	let encoder_tb = encoder.time_base();
+	while encoder.receive_packet(out_packet).is_ok() {
+		out_packet.set_stream(mapping.output_index);
+		out_packet.rescale_ts(encoder_tb, mapping.output_time_base);
+		out_packet.write_interleaved(octx)?;
 	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn test_pipeline_stats_percentage() {
-		let stats = PipelineStats {
-			output_frames: 0,
-			output_packets: 50,
-			dropped_packets: 50,
-		};
-		assert!((stats.kept_percentage() - 50.0).abs() < 0.001);
-
-		let stats_empty = PipelineStats::default();
-		assert!((stats_empty.kept_percentage() - 100.0).abs() < 0.001);
-
-		let stats_full = PipelineStats {
-			output_frames: 10,
-			output_packets: 100,
-			dropped_packets: 0,
-		};
-		assert!((stats_full.kept_percentage() - 100.0).abs() < 0.001);
-	}
+	Ok(())
 }

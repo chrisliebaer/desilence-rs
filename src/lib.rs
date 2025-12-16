@@ -3,6 +3,7 @@
 //! This crate provides functionality to detect and remove silent segments from video files,
 //! streaming the output to stdout in NUT format for consumption by an external ffmpeg encoder.
 
+pub mod audio_trim;
 pub mod cli;
 pub mod error;
 pub mod pipeline;
