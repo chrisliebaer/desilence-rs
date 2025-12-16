@@ -455,9 +455,6 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 					out_packet.set_pts(Some(new_pts));
 					out_packet.set_dts(Some(new_pts)); // Subtitles usually PTS=DTS
 
-					// Rescale duration? Duration should be relatively same in seconds
-					// New_Dur_Ticks = Duration_Secs * Output_TB_Rate
-					// Duration_Secs = Old_Dur_Ticks * Input_TB_Rate
 					out_packet.rescale_ts(mapping.input_time_base, mapping.output_time_base);
 
 					out_packet.write_interleaved(&mut octx)?;
