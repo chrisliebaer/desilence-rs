@@ -51,7 +51,7 @@ jobs:
           
           NEW_VERSION=$(cat .version)
           echo "New Version: $NEW_VERSION"
-          echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
+          echo "NEW_VERSION=$NEW_VERSION" >> "$GITHUB_ENV"
           rm .version
 
       - name: Commit and Push
