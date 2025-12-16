@@ -21,6 +21,15 @@ jobs:
           # Install both build tools (for static build) and dev libs (for dynamic link)
           # This ensures clippy works regardless of whether --all-features enables static feature
           sudo apt-get install -y yasm nasm pkg-config libclang-dev clang libavcodec-dev libavformat-dev libavfilter-dev libavdevice-dev libavutil-dev
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
