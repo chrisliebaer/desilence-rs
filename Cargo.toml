@@ -1,6 +1,6 @@
 [package]
 name = "desilence-rs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Remove silence from video files, streaming output to stdout"
 license = "MIT"
