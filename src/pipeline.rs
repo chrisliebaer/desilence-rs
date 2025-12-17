@@ -139,63 +139,34 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 				encoder_ctx.set_height(decoder.height());
 				encoder_ctx.set_format(decoder.format());
 
-				// COMPREHENSIVE DIAGNOSTIC LOGGING
-				let fps_decoder = decoder.frame_rate();
-				let fps_avg = ist.avg_frame_rate();
-				let fps_rate = ist.rate();
-				let tb_input = ist.time_base();
-
-				info!(
-					"FPS CANDIDATES | Decoder: {:?} | Avg: {}/{} | Rate: {}/{} | TimeBase: {}/{}",
-					fps_decoder,
-					fps_avg.numerator(),
-					fps_avg.denominator(),
-					fps_rate.numerator(),
-					fps_rate.denominator(),
-					tb_input.numerator(),
-					tb_input.denominator()
-				);
-
-				// Priority Selection (No filters, just preference)
-				// 1. Avg Frame Rate (Prioritized as per ffprobe similarity)
-				// 2. Decoder Frame Rate
-				// 3. Stream Rate
-				// 4. TimeBase Fallback
-				let (output_time_base, source_name) = if fps_avg.numerator() > 0 {
-					(Rational(fps_avg.denominator(), fps_avg.numerator()), "stream_avg")
-				} else if let Some(fps) = fps_decoder.filter(|f| f.numerator() > 0) {
-					(Rational(fps.denominator(), fps.numerator()), "decoder")
-				} else if fps_rate.numerator() > 0 {
-					(Rational(fps_rate.denominator(), fps_rate.numerator()), "stream_rate")
+				// Determine output time base from stream metadata.
+				// 1. avg_frame_rate: Primary source (container metadata), verified to establish correct 30fps.
+				// 2. r_frame_rate: Secondary source (nominal rate), also verified to establish correct 30fps.
+				let output_time_base = if ist.avg_frame_rate().numerator() > 0 {
+					let fps = ist.avg_frame_rate();
+					Rational(fps.denominator(), fps.numerator())
+				} else if ist.rate().numerator() > 0 {
+					let fps = ist.rate();
+					Rational(fps.denominator(), fps.numerator())
 				} else {
-					(tb_input, "input_time_base")
+					ist.time_base()
 				};
-
-				info!(
-					"SELECTED TIME BASE: {}/{} (Source: {})",
-					output_time_base.numerator(),
-					output_time_base.denominator(),
-					source_name
-				);
 
 				encoder_ctx.set_time_base(output_time_base);
 
-				// Fix: Set the frame rate to the inverse of the time base we selected.
-				// This ensures that r_frame_rate / avg_frame_rate are populated in the stream.
-				// decoder.frame_rate() was returning None/0/0, causing the issue.
+				// Explicitly set the encoder frame rate derived from the verified time base.
+				// This ensures the stream metadata is populated correctly.
 				if output_time_base.numerator() > 0 {
 					let fps = Rational(output_time_base.denominator(), output_time_base.numerator());
 					encoder_ctx.set_frame_rate(Some(fps));
-				} else {
-					encoder_ctx.set_frame_rate(decoder.frame_rate());
 				}
 
 				let opened = encoder_ctx.open()?;
 				ost.set_parameters(&opened);
 				ost.set_time_base(output_time_base);
 
-				// Fix: Explicitly set stream frame rate (avg_frame_rate)
-				// set_parameters does NOT copy frame rate as it's a stream property, not codec property.
+				// Explicitly set stream-level frame rate metadata (avg_frame_rate).
+				// set_parameters does not copy this property from the encoder context.
 				if output_time_base.numerator() > 0 {
 					let fps = Rational(output_time_base.denominator(), output_time_base.numerator());
 					ost.set_avg_frame_rate(fps);
@@ -325,20 +296,6 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 
 	if audio_decoders.is_empty() {
 		return Err(DesilenceError::NoAudioStream);
-	}
-
-	// Verify time bases before writing header
-	for i in 0..octx.nb_streams() {
-		let st = octx.stream(i as usize).unwrap();
-		let tb = st.time_base();
-		info!(
-			"PRE-HEADER Stream #{} TimeBase: {}/{} Rate: {}/{}",
-			i,
-			tb.numerator(),
-			tb.denominator(),
-			st.rate().numerator(),
-			st.rate().denominator()
-		);
 	}
 
 	// Write output header
