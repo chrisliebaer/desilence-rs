@@ -138,11 +138,39 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 				encoder_ctx.set_width(decoder.width());
 				encoder_ctx.set_height(decoder.height());
 				encoder_ctx.set_format(decoder.format());
-				encoder_ctx.set_time_base(ist.time_base());
-				encoder_ctx.set_frame_rate(decoder.frame_rate());
+
+				// Determine output time base from stream metadata.
+				// 1. avg_frame_rate: Primary source (container metadata), verified to establish correct 30fps.
+				// 2. r_frame_rate: Secondary source (nominal rate), also verified to establish correct 30fps.
+				let output_time_base = if ist.avg_frame_rate().numerator() > 0 {
+					let fps = ist.avg_frame_rate();
+					Rational(fps.denominator(), fps.numerator())
+				} else if ist.rate().numerator() > 0 {
+					let fps = ist.rate();
+					Rational(fps.denominator(), fps.numerator())
+				} else {
+					ist.time_base()
+				};
+
+				encoder_ctx.set_time_base(output_time_base);
+
+				// Explicitly set the encoder frame rate derived from the verified time base.
+				// This ensures the stream metadata is populated correctly.
+				if output_time_base.numerator() > 0 {
+					let fps = Rational(output_time_base.denominator(), output_time_base.numerator());
+					encoder_ctx.set_frame_rate(Some(fps));
+				}
 
 				let opened = encoder_ctx.open()?;
 				ost.set_parameters(&opened);
+				ost.set_time_base(output_time_base);
+
+				// Explicitly set stream-level frame rate metadata (avg_frame_rate).
+				// set_parameters does not copy this property from the encoder context.
+				if output_time_base.numerator() > 0 {
+					let fps = Rational(output_time_base.denominator(), output_time_base.numerator());
+					ost.set_avg_frame_rate(fps);
+				}
 
 				debug!(
 						input = ist_index,
