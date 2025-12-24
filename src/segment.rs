@@ -225,6 +225,26 @@ pub fn invert_silence_segments(
 	SegmentList::new(segments)
 }
 
+/// Calculate the overlap range between two time ranges [start1, end1) and [start2, end2).
+/// Returns Some(Segment) with the overlapping range, or None if no overlap.
+/// The returned segment type is generic (Audible) just to hold the range.
+pub fn get_overlap(start1: f64, end1: f64, start2: f64, mut end2: Option<f64>) -> Option<Segment> {
+	let e2 = end2.get_or_insert(f64::INFINITY);
+
+	let max_start = start1.max(start2);
+	let min_end = end1.min(*e2);
+
+	if max_start < min_end {
+		Some(Segment {
+			segment_type: SegmentType::Audible, // Placeholder
+			start: max_start,
+			end: Some(min_end),
+		})
+	} else {
+		None
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
