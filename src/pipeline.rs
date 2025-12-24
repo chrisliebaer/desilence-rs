@@ -41,6 +41,8 @@ struct StreamMapping {
 	output_time_base: Rational,
 	/// Stream type
 	media_type: media::Type,
+	/// Last processed linear PTS for this stream (for strict monotonicity)
+	last_pts: Option<i64>,
 }
 
 /// Pipeline configuration
@@ -189,6 +191,7 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 					input_time_base: ist.time_base(),
 					output_time_base: ist.time_base(), // Will update after write_header
 					media_type: medium,
+					last_pts: None,
 				});
 
 				ost_index += 1;
@@ -257,6 +260,7 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 					input_time_base: ist.time_base(),
 					output_time_base: Rational(1, 48000), // Will update after write_header
 					media_type: medium,
+					last_pts: None,
 				});
 
 				ost_index += 1;
@@ -281,6 +285,7 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 					input_time_base: ist.time_base(),
 					output_time_base: ist.time_base(),
 					media_type: medium,
+					last_pts: None,
 				});
 
 				ost_index += 1;
@@ -333,11 +338,97 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 
 	let (video_ist_index, mut video_dec) = video_decoder.unwrap();
 
+	// Unified Global Offset (in Microseconds: AV_TIME_BASE)
+	// Shared across all streams to maintain lock-step sync.
+	let mut global_offset_micros: i64 = 0;
+
+	/// Linearize timestamps using the global offset, correcting for glitches.
+	///
+	/// This function maintains a global synchronization by shifting the timeline whenever a
+	/// non-monotonic timestamp is detected. It ensures all streams remain in lock-step relative
+	/// to the shift.
+	fn linearize_timestamp(mapping: &mut StreamMapping, global_offset_micros: &mut i64, raw_pts: i64, duration: i64) -> i64 {
+		let offset_in_tb = unsafe {
+			ffmpeg::ffi::av_rescale_q(
+				*global_offset_micros,
+				ffmpeg::ffi::AV_TIME_BASE_Q,
+				mapping.input_time_base.into(),
+			)
+		};
+		let mut linear_pts = raw_pts + offset_in_tb;
+
+		if let Some(last) = mapping.last_pts {
+			if linear_pts <= last {
+				// Glitch detected: Shift global timeline to enforce monotonicity
+				let target_pts = last + duration;
+				let shift_needed_in_tb = target_pts - linear_pts;
+
+				let shift_micros = unsafe {
+					ffmpeg::ffi::av_rescale_q(
+						shift_needed_in_tb,
+						mapping.input_time_base.into(),
+						ffmpeg::ffi::AV_TIME_BASE_Q,
+					)
+				};
+
+				*global_offset_micros += shift_micros;
+
+				let new_offset_in_tb = unsafe {
+					ffmpeg::ffi::av_rescale_q(
+						*global_offset_micros,
+						ffmpeg::ffi::AV_TIME_BASE_Q,
+						mapping.input_time_base.into(),
+					)
+				};
+				linear_pts = raw_pts + new_offset_in_tb;
+
+				// Final safety check
+				if linear_pts <= last {
+					linear_pts = last + 1;
+				}
+			}
+		}
+
+		mapping.last_pts = Some(linear_pts);
+		linear_pts
+	}
+
+	/// Calculate frame duration in stream ticks based on FPS.
+	fn calculate_duration_from_fps(fps: Rational, time_base: Rational) -> i64 {
+		if fps.numerator() > 0 {
+			(time_base.denominator() as f64 / time_base.numerator() as f64 / (fps.numerator() as f64 / fps.denominator() as f64))
+				.round() as i64
+		} else {
+			0
+		}
+	}
+
+	/// Calculate frame duration in stream ticks based on sample count.
+	fn calculate_duration_from_samples(samples: i64, rate: i64, time_base: Rational) -> i64 {
+		if rate > 0 {
+			let num = time_base.numerator() as i64;
+			let den = time_base.denominator() as i64;
+			(samples * den) / (num * rate)
+		} else {
+			1024 // Fallback
+		}
+	}
+
+	/// Calculate the final PTS for the output stream, applying silence skipping logic.
+	fn calculate_final_output_pts(linear_pts: i64, mapping: &StreamMapping, segment_offset: &SegmentOffset) -> i64 {
+		let time_offset_in_ticks = (segment_offset.time_offset / f64::from(mapping.output_time_base)).round() as i64;
+
+		let linear_output_pts =
+			unsafe { ffmpeg::ffi::av_rescale_q(linear_pts, mapping.input_time_base.into(), mapping.output_time_base.into()) };
+
+		linear_output_pts - time_offset_in_ticks
+	}
+
 	for (stream, packet) in ictx.packets() {
 		let ist_index = stream.index();
 
 		// Find mapping for this stream
-		let mapping = match stream_mappings.iter().find(|m| m.input_index == ist_index) {
+		let mapping = match stream_mappings.iter_mut().find(|m| m.input_index == ist_index) {
 			Some(m) => m,
 			None => continue, // Stream not mapped
 		};
@@ -359,42 +450,35 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 
 				let mut decoded = frame::Video::empty();
 				while video_dec.receive_frame(&mut decoded).is_ok() {
-					let frame_pts = decoded.pts().unwrap_or(0);
-					let frame_timestamp = frame_pts as f64 * f64::from(mapping.input_time_base);
+					let input_pts = decoded.pts().unwrap_or(0);
 
-					// Check if frame is in an audible segment
+					// Calculate correct duration based on frame rate if available
+					let fps = video_dec.frame_rate();
+					let duration_ticks = if let Some(fps) = fps {
+						calculate_duration_from_fps(fps, mapping.input_time_base)
+					} else {
+						0
+					};
+
+					// Linearize (Presentation Time) -> Updates Global Offset if needed
+					let linear_pts = linearize_timestamp(mapping, &mut global_offset_micros, input_pts, duration_ticks);
+
+					// We use the original input_pts (Raw Time) for segment slicing checks
+					let frame_timestamp = input_pts as f64 * f64::from(mapping.input_time_base);
+
 					if let Some(seg_offset) = segment_offsets
 						.iter()
 						.find(|s| frame_timestamp >= s.start && frame_timestamp < s.end)
 					{
-						let output_timestamp = frame_timestamp - seg_offset.time_offset;
+						let final_pts = calculate_final_output_pts(linear_pts, mapping, seg_offset);
 
-						// Convert to Output PTS
-						let tb_num = mapping.output_time_base.numerator() as f64;
-						let tb_den = mapping.output_time_base.denominator() as f64;
-						let output_pts = (output_timestamp * (tb_den / tb_num)).round() as i64;
-
-						let fps = video_dec.frame_rate();
-
-						// Calculate correct duration based on frame rate if available
-						// We need duration for the container
-						let duration_ts = if let Some(fps) = fps {
-							if fps.numerator() > 0 {
-								// Duration ticks = OutputTB_Den / (OutputTB_Num * FPS)
-								// = (Den / Num) / FPS
-								let tick_duration = (tb_den / tb_num) / (fps.numerator() as f64 / fps.denominator() as f64);
-								tick_duration.round() as i64
-							} else {
-								// Fallback: Rescale input packet duration
-								// Note: decoding might not give frame duration, so we use packet logic approximation
-								// or just 0 if unknown. better to trust standard fps logic.
-								0
-							}
+						let output_duration_ts = if let Some(fps) = fps {
+							calculate_duration_from_fps(fps, mapping.output_time_base)
 						} else {
 							0
 						};
 
-						write_raw_video_frame(&mut octx, &decoded, mapping, output_pts, duration_ts)?;
+						write_raw_video_frame(&mut octx, &decoded, mapping, final_pts, output_duration_ts)?;
 					} else {
 						// Silent frame, drop
 					}
@@ -407,60 +491,58 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 
 						let mut decoded = frame::Audio::empty();
 						while decoder.receive_frame(&mut decoded).is_ok() {
-							let frame_pts = decoded.pts().unwrap_or(0);
+							let input_pts = decoded.pts().unwrap_or(0);
+
+							// Calculate Duration for Linearization
+							let samples = decoded.samples() as i64;
+							let rate = decoder.rate() as i64;
+							let duration_ticks = calculate_duration_from_samples(samples, rate, mapping.input_time_base);
+
+							// Linearize (Presentation Time) -> Updates Global Offset if needed
+							let linear_pts = linearize_timestamp(mapping, &mut global_offset_micros, input_pts, duration_ticks);
+
 							let tb_val = f64::from(mapping.input_time_base);
-							let frame_start_time = frame_pts as f64 * tb_val;
+							let raw_start_time = input_pts as f64 * tb_val;
+							let duration_seconds = if rate > 0 { samples as f64 / rate as f64 } else { 0.0 };
+							let raw_end_time = raw_start_time + duration_seconds;
 
-							let samples = decoded.samples();
-							let sample_rate = decoder.rate() as f64;
-							let duration_seconds = samples as f64 / sample_rate;
-							let frame_end_time = frame_start_time + duration_seconds;
+							for segment in segments.all_segments() {
+								if let Some(overlap) = crate::segment::get_overlap(raw_start_time, raw_end_time, segment.start, segment.end) {
+									let overlap_start_rel = (overlap.start - raw_start_time).max(0.0);
+									let overlap_end_rel = (overlap.end.unwrap() - raw_start_time).min(raw_end_time - raw_start_time);
 
-							// Check intersection with any audible segment
-							// We calculate precise sample intersection to prevent drift
-							if let Some(offset) = segment_offsets
-								.iter()
-								.find(|s| frame_end_time > s.start && frame_start_time < s.end)
-							{
-								// Calculate intersection time range
-								let intersect_start = frame_start_time.max(offset.start);
-								let intersect_end = frame_end_time.min(offset.end);
+									let samples_keep_start = (overlap_start_rel * rate as f64).round() as usize;
+									let samples_keep_end = (overlap_end_rel * rate as f64).round() as usize;
+									let sample_count = decoded.samples();
 
-								// Convert to sample indices relative to frame start
-								let start_offset_secs = intersect_start - frame_start_time;
-								let end_offset_secs = intersect_end - frame_start_time;
+									if samples_keep_start < sample_count && samples_keep_end > samples_keep_start {
+										let output_tb = mapping.output_time_base;
+										let trim_ticks = unsafe {
+											ffmpeg::ffi::av_rescale_q(samples_keep_start as i64, Rational(1, rate as i32).into(), output_tb.into())
+										};
 
-								let start_sample = (start_offset_secs * sample_rate).round() as usize;
-								let end_sample = (end_offset_secs * sample_rate).round() as usize;
+										if let Some(offset_struct) = segment_offsets.iter().find(|s| (s.start - segment.start).abs() < 0.001) {
+											let base_pts = calculate_final_output_pts(linear_pts, mapping, offset_struct);
+											let final_pts = base_pts + trim_ticks;
 
-								let start_sample = start_sample.min(samples);
-								let end_sample = end_sample.min(samples);
-								let keep_samples = end_sample.saturating_sub(start_sample);
+											// Trim, Resample, Encode, Write
+											let keep_samples_len = samples_keep_end - samples_keep_start;
+											crate::audio_trim::trim_audio_frame(&mut decoded, samples_keep_start, keep_samples_len);
 
-								if keep_samples > 0 {
-									// Trim the frame in-place to alignment with cuts
-									crate::audio_trim::trim_audio_frame(&mut decoded, start_sample, keep_samples);
+											let mut resampled_frame = frame::Audio::empty();
+											if let Some(resampler) = audio_resamplers.get_mut(&ist_index) {
+												resampler.run(&decoded, &mut resampled_frame)?;
+											}
 
-									// Recalculate PTS for the trimmed start
-									let output_timestamp = intersect_start - offset.time_offset;
+											resampled_frame.set_pts(Some(final_pts));
 
-									// Resample
-									let mut resampled_frame = frame::Audio::empty();
-									if let Some(resampler) = audio_resamplers.get_mut(&ist_index) {
-										resampler.run(&decoded, &mut resampled_frame)?;
-									}
+											if let Some(encoder) = audio_encoders.get_mut(&ist_index) {
+												encoder.send_frame(&resampled_frame)?;
 
-									let tb_num = mapping.output_time_base.numerator() as f64;
-									let tb_den = mapping.output_time_base.denominator() as f64;
-									let output_pts = (output_timestamp * (tb_den / tb_num)).round() as i64;
-
-									resampled_frame.set_pts(Some(output_pts));
-
-									if let Some(encoder) = audio_encoders.get_mut(&ist_index) {
-										encoder.send_frame(&resampled_frame)?;
-
-										let mut out_packet = Packet::empty();
-										flush_audio_encoder(encoder, &mut out_packet, &mut octx, mapping)?;
+												let mut out_packet = Packet::empty();
+												flush_audio_encoder(encoder, &mut out_packet, &mut octx, mapping)?;
+											}
+										}
 									}
 								}
 							}
@@ -496,11 +578,21 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 
 	// Flush decoders
 	// Re-find mapping for video stream using the captured index
-	if let Some(mapping) = stream_mappings.iter().find(|m| m.input_index == video_ist_index) {
+	if let Some(mapping) = stream_mappings.iter_mut().find(|m| m.input_index == video_ist_index) {
 		video_dec.send_eof()?;
 		let mut decoded = frame::Video::empty();
 		while video_dec.receive_frame(&mut decoded).is_ok() {
 			let frame_pts = decoded.pts().unwrap_or(0);
+
+			let fps = video_dec.frame_rate();
+			let duration_ticks = if let Some(fps) = fps {
+				calculate_duration_from_fps(fps, mapping.input_time_base)
+			} else {
+				0
+			};
+
+			let linear_pts = linearize_timestamp(mapping, &mut global_offset_micros, frame_pts, duration_ticks);
+
 			let frame_timestamp = frame_pts as f64 * f64::from(mapping.input_time_base);
 
 			// Check if frame is in an audible segment
@@ -508,24 +600,15 @@ pub fn run_pipeline<P: AsRef<std::path::Path>>(
 				.iter()
 				.find(|s| frame_timestamp >= s.start && frame_timestamp < s.end)
 			{
-				let output_timestamp = frame_timestamp - seg_offset.time_offset;
-				let tb_num = mapping.output_time_base.numerator() as f64;
-				let tb_den = mapping.output_time_base.denominator() as f64;
-				let output_pts = (output_timestamp * (tb_den / tb_num)).round() as i64;
+				let final_pts = calculate_final_output_pts(linear_pts, mapping, seg_offset);
 
-				// Approximation for flush frames
-				let fps = video_dec.frame_rate();
-				let duration_ts = if let Some(fps) = fps {
-					if fps.numerator() > 0 {
-						((tb_den / tb_num) / (fps.numerator() as f64 / fps.denominator() as f64)).round() as i64
-					} else {
-						0
-					}
+				let output_duration_ts = if let Some(fps) = fps {
+					calculate_duration_from_fps(fps, mapping.output_time_base)
 				} else {
 					0
 				};
 
-				write_raw_video_frame(&mut octx, &decoded, mapping, output_pts, duration_ts)?;
+				write_raw_video_frame(&mut octx, &decoded, mapping, final_pts, output_duration_ts)?;
 			}
 		}
 	}
